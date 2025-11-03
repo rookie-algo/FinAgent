@@ -1,0 +1,28 @@
+[project]
+name = "fin-agent"
+version = "0.1.0"
+requires-python = ">=3.11,<3.14"   # ← Fixed!
+dependencies = [
+    "Django==5.1.2",
+    "djangorestframework==3.15.2",
+    "djangorestframework-simplejwt==5.3.1",
+    "psycopg2-binary==2.9.11",
+    "uvicorn[standard]",
+    "langchain==1.0.2",
+    "langchain-openai==1.0.1",
+    "yfinance==0.2.64",
+    "pydantic==2.12.3",
+    "pydantic[email]",
+    "python-dotenv==1.0.1",
+    "sqlmodel==0.0.18",
+    "psycopg2-binary==2.9.11",
+    "redis==5.0.0",
+    "pyjwt",
+    "drf-spectacular",
+    "pydantic-settings>=2.0.0",
+    "passlib[bcrypt]==1.7.4"
+]
+
+[dependency-groups]
+dev = ["pytest", "pytest-django"]
+prod = ["gunicorn>=22.0.0"]

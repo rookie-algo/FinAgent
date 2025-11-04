@@ -130,3 +130,8 @@ yarn-error.log*
 
 # Docker volumes (don't commit)
 docker-compose.yml.override
+
+# Celery beat
+celerybeat-schedule
+celerybeat-schedule-shm
+celerybeat-schedule-wal

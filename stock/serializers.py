@@ -19,6 +19,7 @@ class WatchListSerializer(serializers.ModelSerializer):
     
 
 class StockInfoSerializer(serializers.ModelSerializer):
+
     class Meta:
         model = StockInfo
         fields = ["id", "symbol", "industry", "website", "country", "summary"]

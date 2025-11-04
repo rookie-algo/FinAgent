@@ -11,6 +11,8 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 import os
 
+
+from celery.schedules import crontab
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -110,6 +112,40 @@ DATABASES = {
        'ENGINE': 'django.db.backends.sqlite3', # SQLite database engine
        'NAME': BASE_DIR / 'db.sqlite3', # Path to the database file
    }
+}
+
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", REDIS_URL)
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://redis:6379/1")
+
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = "UTC"
+
+# --- Django Redis Cache ---
+
+CELERY_BEAT_SCHEDULE = {
+    "sync-stock-prices-every-5-min": {
+        "task": "stock.tasks.sync_all_prices",
+        'schedule': crontab(
+            minute='*/5',
+            hour='14-23',
+            day_of_week='1-5'
+        ),
+    },
+}
+
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": REDIS_URL,
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        },
+    }
 }
 
 # Password validation

@@ -7,7 +7,8 @@ from rest_framework_simplejwt.views import (
 )
 
 from users.views import UserViewSet
-from stock.views import AddToWatchListAPIView, WatchListCreateListAPIView, StockInfoDetailAPIView
+from stock.views import AddToWatchListAPIView, WatchListCreateListAPIView, \
+    WatchListDetainAPIView, StockInfoDetailAPIView
 
 
 urlpatterns = [
@@ -20,6 +21,8 @@ urlpatterns = [
     # Get or Add user
     path('api/users/', UserViewSet.as_view({'get': 'list', 'post': 'create'}), name='get-users'),
     path('api/watchlists/', WatchListCreateListAPIView.as_view(), name='watchlist-list-create'),
+    path('api/watchlists/detail/', WatchListDetainAPIView.as_view(), name='watchlist-list-create'),
+    
     path('api/add-to-list/', AddToWatchListAPIView.as_view(), name='watchlist-list-create'),
     path('api/stock-info/', StockInfoDetailAPIView.as_view(), name='watchlist-list-create'),
     

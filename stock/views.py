@@ -1,8 +1,9 @@
 # stocks/views.py
+from django.core.cache import cache
+from django.shortcuts import get_object_or_404
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, permissions
-from django.shortcuts import get_object_or_404
 
 from .models import WatchList, StockInfo
 from .serializers import WatchListSerializer, StockInfoSerializer
@@ -23,7 +24,7 @@ class WatchListCreateListAPIView(APIView):
         })
         if serializer.is_valid():
             watchlist = serializer.save()
-            return Response(WatchListSerializer(watchlist).data)
+            return Response(WatchListSerializer(watchlist).data, status=status.HTTP_201_CREATED)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -36,6 +37,17 @@ class WatchListCreateListAPIView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class WatchListDetainAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]  # adjust to your auth needs
+
+    def get(self, request):
+        watchlist_id = request.query_params.get('watchlist_id')
+        watchlist = get_object_or_404(WatchList, user=request.user, id=watchlist_id)
+        return Response({
+            "name": watchlist.name,
+            "stock": StockInfoSerializer(watchlist.stocks, many=True).data
+        })
+
 
 class AddToWatchListAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]  # adjust to your auth needs
@@ -47,7 +59,7 @@ class AddToWatchListAPIView(APIView):
         watchlist = get_object_or_404(WatchList, user=request.user, id=watchlist_id)
         stock, _ = StockInfo.objects.get_or_create(symbol=request.data.get('symbol'))
         watchlist.stocks.add(stock)
-        return Response(WatchListSerializer(watchlist, many=True).data)
+        return Response(WatchListSerializer(watchlist).data, status=status.HTTP_201_CREATED)
 
 
 class StockInfoDetailAPIView(APIView):
@@ -55,7 +67,8 @@ class StockInfoDetailAPIView(APIView):
 
     def get(self, request):
         stocks = StockInfo.objects.all()
-        return Response(StockInfoSerializer(stocks, many=True).data)
+        stock_price = cache.get('stock_price')
+        return Response({"stocks": StockInfoSerializer(stocks, many=True).data, "stock_price": stock_price})
 
     def delete(self, request):
         symbol = request.data.get('symbol')

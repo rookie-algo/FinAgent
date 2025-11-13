@@ -3,12 +3,14 @@
 Bootstrap script for Django SaaS project.
 Runs migrations, creates admin, starts server.
 """
-
+import logging
 import os
 import sys
 import subprocess
+
 from pathlib import Path
 from dotenv import load_dotenv
+
 
 # Load .env
 load_dotenv()
@@ -30,7 +32,7 @@ User = get_user_model()
 
 
 def run_command(cmd, check=True):
-    print(f"\nRunning: {' '.join(cmd)}")
+    logging.info(f"\nRunning: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=BASE_DIR)
     if check and result.returncode != 0:
         sys.exit(result.returncode)
@@ -43,23 +45,23 @@ def create_superuser():
     admin_password = os.getenv("DJANGO_SUPERUSER_PASSWORD")
 
     if not admin_email or not admin_password:
-        print("Skipping superuser creation (DJANGO_SUPERUSER_EMAIL/PASSWORD not set)")
+        logging.info("Skipping superuser creation (DJANGO_SUPERUSER_EMAIL/PASSWORD not set)")
         return
 
     if not User.objects.filter(email=admin_email).exists():
-        print(f"Creating superuser: {admin_email}")
+        logging.info(f"Creating superuser: {admin_email}")
         User.objects.create_superuser(
             username=username,
             email=admin_email,
             password=admin_password
         )
     else:
-        print(f"Superuser {admin_email} already exists")
+        logging.info(f"Superuser {admin_email} already exists")
 
 
 def run_migrations():
     """Run makemigrations + migrate"""
-    print("Applying migrations...")
+    logging.info("Applying migrations...")
     run_command(["uv", "run", "python", "manage.py", "makemigrations"])
     run_command(["uv", "run", "python", "manage.py", "migrate"])
 
@@ -75,7 +77,7 @@ def main():
     env = os.getenv("ENVIRONMENT", "development").lower()
 
     if env == "production":
-        print("Starting Gunicorn (production mode)...")
+        logging.info("Starting Gunicorn (production mode)...")
         cmd = [
             "uv", "run", "gunicorn",
             "app.wsgi:app",
@@ -84,7 +86,7 @@ def main():
             "--log-level", "info"
         ]
     else:
-        print("Starting Django dev server...")
+        logging.info("Starting Django dev server...")
         cmd = ["uv", "run", "python", "manage.py", "runserver", "0.0.0.0:8000"]
 
     # Execute server

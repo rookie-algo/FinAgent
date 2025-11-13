@@ -74,4 +74,3 @@ class User(AbstractBaseUser, PermissionsMixin):
             self.tier = self.Tier.FREE
             self.tier_expiration = None
             self.save(update_fields=["tier", "tier_expiration"])
-

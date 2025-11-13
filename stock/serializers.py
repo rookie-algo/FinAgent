@@ -1,5 +1,6 @@
 from rest_framework import serializers
-from .models import WatchList, StockInfo, TIER_LIMITS
+
+from stock.models import WatchList, StockInfo, TIER_LIMITS
 
 
 class WatchListSerializer(serializers.ModelSerializer):

@@ -6,8 +6,8 @@ import pandas as pd
 import talib
 from talib import MA_Type
 
-from .utils import _fetch_finance_df_with_symbol, _last, _minmax01, \
-      _tail, _to_float_list, _slope, _z
+from agent.utils import fetch_finance_df_with_symbol, last, minmax01, \
+      tail, to_float_list, slope, z
 
 
 @tool("trend_detection")

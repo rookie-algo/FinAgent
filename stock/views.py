@@ -37,7 +37,7 @@ class WatchListCreateListAPIView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class WatchListDetainAPIView(APIView):
+class WatchListDetailAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]  # adjust to your auth needs
 
     def get(self, request):
@@ -67,7 +67,7 @@ class StockInfoDetailAPIView(APIView):
 
     def get(self, request):
         stocks = StockInfo.objects.all()
-        stock_price = cache.get('stock_price')
+        stock_price = cache.get('stock:realtime_price')
         return Response({"stocks": StockInfoSerializer(stocks, many=True).data, "stock_price": stock_price})
 
     def delete(self, request):

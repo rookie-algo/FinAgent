@@ -6,74 +6,23 @@ import pandas as pd
 import talib
 from talib import MA_Type
 
-from agent.utils import fetch_finance_df_with_symbol, last, minmax01, \
+from agent.utils import get_price_history, last, minmax01, \
       tail, to_float_list, slope, z
 
 
 @tool("trend_detection")
 def trend_detection(symbol: str) -> str:
     """
-    Build a **strict-JSON analysis prompt** for evaluating a stock’s *Trend Detection* from cached OHLCV data.
-
-    Purpose
-    -------
-    For autonomous/semi-autonomous AI agents. This tool returns a **prompt string**; it does **not** provide advice.
-    The downstream LLM must summarize **direction, strength, and momentum state** using numeric series only.
-
-    Inputs
-    ------
-    symbol : str
-        Ticker used to fetch a cached pandas.DataFrame (Redis/RAG). Columns required:
-        ["Open","High","Low","Close","Volume"] ordered by time ascending.
-
-    Data semantics
-    --------------
-    - Lookback: 14 most recent sessions.
-    - Array order: **oldest → newest**.
-    - All values are decimals (≤ 3 dp).
-
-    Computed features (last 14)
-    ---------------------------
-    - ema_5, ema_12, ema_26            : short/mid/long smoothed prices
-    - ema12_minus_ema26                : mid–long spread
-    - macd, macd_signal, macd_hist     : differential / reference / residual series
-    - adx, plus_di, minus_di           : directional clarity proxies
-    - cci                              : deviation-from-mean proxy
-    Helper features: ema_spread_slope, macd_hist_slope, adx_slope, cci_z
-
-    Expected Output (LLM response)
-    ------------------------------
-    STRICT JSON matching:
-      {
-        "status":"ok",
-        "header":{"symbol":<str>,"lookback_points":14},
-        "summary":{
-          "direction":"up"|"down"|"sideways"|"mixed",
-          "strength":"weak"|"moderate"|"strong",
-          "momentum":"building"|"fading"|"stable",
-          "confidence":0..1,
-          "explanation":"Plain-language summary (no indicator names).",
-          "rationale":"Concise numeric reasoning (no indicator names)."
-        },
-        "safety":{"advice_compliance":"no_advice"}
-      }
-    If the first output violates the schema, the LLM must immediately return a corrected STRICT JSON.
-
-    Failure Modes
-    -------------
-    - If any required list has <14 points or non-numeric values, return:
-      {"status":"insufficient_data","reason":"<reason>"}
-    - Cache miss / bad schema → raise upstream error.
-
-    Guardrails & Runtime Hints
-    --------------------------
-    - No trading signals, predictions, targets, or instructions.
-    - Do not mention indicator names in explanation/rationale (feature mapping is for context only).
-    - Recommend LLM params: temperature ≤ 0.3, max_tokens ≈ 120.
+    Generate a STRICT-JSON trend-analysis prompt using cached OHLCV data.
+    Returns a compact instruction prompt and 14-point numeric features.
+    No advice. No indicator names in explanation/rationale.
+    Output must follow the exact JSON schema included in the prompt.
     """
     k = 14
-    df = _fetch_finance_df_with_symbol(symbol=symbol)
+    df = get_price_history(symbol=symbol)
     close, high, low = df["Close"], df["High"], df["Low"]
+
+    # Indicators
     ema_5  = talib.EMA(close, 5)
     ema_12 = talib.EMA(close, 12)
     ema_26 = talib.EMA(close, 26)
@@ -85,183 +34,95 @@ def trend_detection(symbol: str) -> str:
     minus_di = talib.MINUS_DI(high, low, close, 14)
     cci      = talib.CCI(high, low, close, 14)
 
-    # ---------- assemble lists (last k points, rounded) ----------
+    # assemble lists
     lists = {
-        "ema_5": _tail(ema_5, k),
-        "ema_12": _tail(ema_12, k),
-        "ema_26": _tail(ema_26, k),
-        "ema12_minus_ema26": _tail(ema12_26, k),
-        "macd": _tail(macd, k),
-        "macd_signal": _tail(macd_sig, k),
-        "macd_hist": _tail(macd_hist, k),
-        "adx": _tail(adx, k),
-        "plus_di": _tail(plus_di, k),
-        "minus_di": _tail(minus_di, k),
-        "cci": _tail(cci, k),
+        "ema_5": tail(ema_5, k),
+        "ema_12": tail(ema_12, k),
+        "ema_26": tail(ema_26, k),
+        "ema12_minus_ema26": tail(ema12_26, k),
+        "macd": tail(macd, k),
+        "macd_signal": tail(macd_sig, k),
+        "macd_hist": tail(macd_hist, k),
+        "adx": tail(adx, k),
+        "plus_di": tail(plus_di, k),
+        "minus_di": tail(minus_di, k),
+        "cci": tail(cci, k),
     }
 
-    # ---------- sanity checks ----------
-    required = ["ema_5","ema_12","ema_26","ema12_minus_ema26",
-                "macd","macd_signal","macd_hist","adx","plus_di","minus_di","cci"]
-    for key in required:
-        if len(lists[key]) < k:
-            return json.dumps({"status":"insufficient_data","reason":f"{key}_len<{k}"})
+    for key, v in lists.items():
+        if len(v) < k:
+            return json.dumps({"status": "insufficient_data", "reason": f"{key}_len<{k}"})
 
-    # ensure native floats (no np.float64) and fixed precision
-    lists = {k_: _to_float_list(v, 3) for k_, v in lists.items()}
+    lists = {k_: to_float_list(v, 3) for k_, v in lists.items()}
 
-    # ---------- helper features ----------
     features = {
-        "ema_spread_slope": _slope(lists["ema12_minus_ema26"]),
-        "macd_hist_slope":  _slope(lists["macd_hist"]),
-        "adx_slope":        _slope(lists["adx"]),
-        "cci_z":            _z(lists["cci"]),
-    }
-    
-    # cast helpers to JSON-safe floats
-    features_json = {
-        "ema_spread_slope": float(features["ema_spread_slope"]),
-        "macd_hist_slope":  float(features["macd_hist_slope"]),
-        "adx_slope":        float(features["adx_slope"]),
-        "cci_z":            _to_float_list(features["cci_z"], 3)
+        "ema_spread_slope": float(slope(lists["ema12_minus_ema26"])),
+        "macd_hist_slope":  float(slope(lists["macd_hist"])),
+        "adx_slope":        float(slope(lists["adx"])),
+        "cci_z":            to_float_list(z(lists["cci"]), 3),
     }
 
-    header = {"symbol": symbol, "lookback_points": k}
+    data_json    = json.dumps(lists, separators=(",", ":"))
+    helpers_json = json.dumps(features, separators=(",", ":"))
+    header_json  = json.dumps({"symbol": symbol, "lookback_points": k})
 
-    # ---------- stable JSON blocks ----------
-    data_json    = json.dumps(lists, separators=(",", ":"), ensure_ascii=False)
-    helpers_json = json.dumps(features_json, separators=(",", ":"), ensure_ascii=False)
-    header_json  = json.dumps(header, separators=(",", ":"), ensure_ascii=False)
+    # --------- Compact Prompt (TPM-SAFE) ---------
+    prompt = f"""
+STRICT JSON ONLY. No markdown. No extra keys.
+If data insufficient: {{"status":"insufficient_data","reason":"<reason>"}}.
 
-    # ---------- final prompt ----------
-    prompt = (
-f'You are a market analysis model.\n'
-f'Use ONLY the numeric lists provided. Do NOT mention technical indicator names.\n'
-f'Provide an objective description of price behavior. No advice, predictions, targets, or instructions.\n\n'
-f'OUTPUT REQUIREMENTS\n'
-f'- Respond with STRICT JSON using double quotes only, no markdown, no extra keys.\n'
-f'- Do not include your reasoning steps.\n'
-f'- Numeric fields must be decimals with at most 3 digits after the point.\n\n'
-f'IF DATA INSUFFICIENT\n'
-f'- If any required list has fewer than {k} points, or values are non-numeric, respond:\n'
-f'{{"status":"insufficient_data","reason":"<reason>"}}\n\n'
-f'SCHEMA (must match exactly)\n'
-f'{{\n'
-f'  "status":"ok",\n'
-f'  "header": {header_json},\n'
-f'  "summary": {{\n'
-f'    "direction":"up"|"down"|"sideways"|"mixed",\n'
-f'    "strength":"weak"|"moderate"|"strong",\n'
-f'    "momentum":"building"|"fading"|"stable",\n'
-f'    "confidence":0..1,\n'
-f'    "explanation":"Short plain-language summary with no indicator names.",\n'
-f'    "rationale":"One concise technical justification with no indicator names."\n'
-f'  }},\n'
-f'  "safety":{{"advice_compliance":"no_advice"}}\n'
-f'}}\n\n'
-f'Feature mapping:\n'
-f'{{\n'
-f'  "ema_5": "5-period Exponential Moving Average",\n'
-f'  "ema_12": "12-period Exponential Moving Average",\n'
-f'  "ema_26": "26-period Exponential Moving Average",\n'
-f'  "macd": "Momentum differential between short and long averages",\n'
-f'  "macd_signal": "Smoothed momentum reference line",\n'
-f'  "macd_hist": "Difference between momentum and reference line",\n'
-f'  "adx": "Trend strength measure",\n'
-f'  "plus_di": "Positive movement measure",\n'
-f'  "minus_di": "Negative movement measure",\n'
-f'  "cci": "Price deviation strength from mean"\n'
-f'}}\n\n'
-f'These mappings are only to clarify feature meaning — do not mention or restate them in your output.\n\n'
-f'Each array lists the most recent 14 sequential values from oldest → newest.\n'
-f'DECISION RULES\n'
-f'- If most lists imply the same direction, set "direction" accordingly; otherwise "mixed".\n'
-f'- If recent changes are small and contradictory, prefer "sideways" or "mixed".\n'
-f'- Map strength by magnitude/consistency across lists (weak/moderate/strong).\n'
-f'- Momentum reflects recent acceleration or deceleration (building/fading/stable).\n'
-f'- Set "confidence" in [0.00,1.00] proportional to agreement; never 1.00.\n\n'
-f'NUMERIC DATA\n'
-f'{data_json}\n\n'
-f'HELPER FEATURES\n'
-f'{helpers_json}\n\n'
-f'Return only the JSON. Max 120 tokens.'
-    )
+Schema:
+{{
+  "status":"ok",
+  "header": {header_json},
+  "summary": {{
+    "direction":"up"|"down"|"sideways"|"mixed",
+    "strength":"weak"|"moderate"|"strong",
+    "momentum":"building"|"fading"|"stable",
+    "confidence":0..1,
+    "explanation":"Plain-language summary. No indicator names.",
+    "rationale":"Concise numeric justification. No indicator names."
+  }},
+  "safety":{{"advice_compliance":"no_advice"}}
+}}
+
+Rules:
+- Use ONLY numeric data below.
+- Base direction/strength/momentum on consistency + magnitude.
+- Confidence reflects numeric agreement (never 1.0).
+- No advice. No predictions.
+
+DATA:
+{data_json}
+
+FEATURES:
+{helpers_json}
+
+Return STRICT JSON only.
+""".strip()
+
     return prompt
 
 
 @tool("momentum_strength")
 def momentum_strength(symbol: str) -> str:
     """
-    Build a **strict-JSON analysis prompt** for evaluating a stock’s *Momentum & Strength* from cached OHLCV data.
-
-    Purpose
-    -------
-    For autonomous/semi-autonomous AI agents. This tool returns a **prompt string**; it does **not** provide advice.
-    The downstream LLM must summarize **short-term momentum, participation strength, and buy/sell pressure**
-    using numeric series only.
-
-    Inputs
-    ------
-    symbol : str
-        Ticker used to fetch a cached pandas.DataFrame (Redis/RAG). Required columns:
-        ["Open","High","Low","Close","Volume"] in ascending time.
-
-    Data semantics
-    --------------
-    - Lookback: last 14 **sessions**.
-    - Array order: **oldest → newest**.
-    - Values are decimals (≤ 3 dp). Non-numeric/NaN triggers insufficient-data.
-
-    Computed features (last 14)
-    ---------------------------
-    - rsi                 : bounded momentum series
-    - slowk, slowd        : short-horizon oscillator (library defaults, e.g., STOCH fastk=5, fastd=3, type=SMA)
-    - roc                 : rate-of-change (speed)
-    - mfi                 : volume-aware momentum
-    Helper features: rsi_slope, mfi_slope, roc_slope, stoch_diff_slope (slowk−slowd), rsi_z, mfi_z.
-
-    Expected Output (LLM response)
-    ------------------------------
-    STRICT JSON matching exactly:
-      {
-        "status":"ok",
-        "header":{"symbol":<str>,"lookback_points":14},
-        "summary":{
-          "momentum_state":"rising"|"falling"|"neutral"|"mixed",
-          "strength":"weak"|"moderate"|"strong",
-          "pressure":"buying"|"selling"|"balanced",
-          "confidence":0..1,
-          "explanation":"Plain-language summary (no indicator names).",
-          "rationale":"Concise numeric reasoning (no indicator names)."
-        },
-        "safety":{"advice_compliance":"no_advice"}
-      }
-    If the first output violates the schema, the LLM must immediately return a corrected STRICT JSON.
-
-    Failure Modes
-    -------------
-    - If any required list has <14 points, return:
-      {"status":"insufficient_data","reason":"<reason>"}
-    - Upstream errors: cache miss, corrupt payloads, or bad schema.
-
-    Guardrails & Runtime Hints
-    --------------------------
-    - No trading signals, predictions, targets, or instructions.
-    - Do not mention indicator names in explanation/rationale (feature mapping is for context only).
-    - Suggested LLM params: temperature ≤ 0.3, max_tokens ≈ 120.
-    - Handle zero/near-zero volume safely for MFI; ensure numeric coercion.
+    Return a compact STRICT-JSON momentum-analysis prompt using cached OHLCV data.
+    Output summarizes momentum_state, strength, pressure, and confidence.
+    No advice. No indicator names. Returns only an instruction prompt + features.
     """
     k = 14
-    df = _fetch_finance_df_with_symbol(symbol=symbol)
+    df = get_price_history(symbol=symbol)
     close, high, low, vol = df["Close"], df["High"], df["Low"], df["Volume"]
 
-    rsi = _tail(talib.RSI(close, timeperiod=14), k)
+    # Indicators
+    rsi = tail(talib.RSI(close, 14), k)
     slowk, slowd = talib.STOCH(high, low, close)
-    slowk, slowd = _tail(slowk, k), _tail(slowd, k)
-    roc = _tail(talib.ROC(close), k)
-    mfi = _tail(talib.MFI(high, low, close, vol), k)
+    slowk, slowd = tail(slowk, k), tail(slowd, k)
+    roc = tail(talib.ROC(close), k)
+    mfi = tail(talib.MFI(high, low, close, vol), k)
 
-    # ---------- lists ----------
+    # Required lists
     lists = {
         "rsi": rsi,
         "slowk": slowk,
@@ -270,155 +131,84 @@ def momentum_strength(symbol: str) -> str:
         "mfi": mfi,
     }
 
-    # ---------- sanity check ----------
-    for key, val in lists.items():
-        if len(val) < k:
-            return json.dumps({"status":"insufficient_data","reason":f"{key}_len<{k}"})
+    for key, v in lists.items():
+        if len(v) < k:
+            return json.dumps({"status": "insufficient_data", "reason": f"{key}_len<{k}"})
 
-    lists = {k_: _to_float_list(v, 3) for k_, v in lists.items()}
+    # JSON-safe floats
+    lists = {k_: to_float_list(v, 3) for k_, v in lists.items()}
 
-    # ---------- helper features ----------
+    # Helper features
     features = {
-        "rsi_slope": _slope(lists["rsi"]),
-        "stoch_diff_slope": _slope(np.array(lists["slowk"]) - np.array(lists["slowd"])),
-        "roc_slope": _slope(lists["roc"]),
-        "mfi_slope": _slope(lists["mfi"]),
-        "rsi_z": _z(lists["rsi"]),
-        "mfi_z": _z(lists["mfi"]),
+        "rsi_slope": float(slope(lists["rsi"])),
+        "stoch_diff_slope": float(slope(np.array(lists["slowk"]) - np.array(lists["slowd"]))),
+        "roc_slope": float(slope(lists["roc"])),
+        "mfi_slope": float(slope(lists["mfi"])),
+        "rsi_z": to_float_list(z(lists["rsi"]), 3),
+        "mfi_z": to_float_list(z(lists["mfi"]), 3),
     }
 
-    features_json = json.dumps({k:v if isinstance(v, list) else float(v) for k,v in features.items()},
-                               separators=(",", ":"), ensure_ascii=False)
-    data_json = json.dumps(lists, separators=(",", ":"), ensure_ascii=False)
-    header_json = json.dumps({"symbol": symbol, "lookback_points": k}, separators=(",", ":"), ensure_ascii=False)
+    data_json = json.dumps(lists, separators=(",", ":"))
+    features_json = json.dumps(features, separators=(",", ":"))
+    header_json = json.dumps({"symbol": symbol, "lookback_points": k})
 
-    # ---------- final prompt ----------
-    prompt = (
-f'You are a market analysis model.\n'
-f"Use ONLY the numeric lists provided. Do NOT mention technical indicator names.\n"
-f"Analyze recent price momentum and strength objectively. No advice, predictions, or targets.\n\n"
-f"OUTPUT REQUIREMENTS\n"
-f"- Respond with STRICT JSON using double quotes only, no markdown, no extra keys.\n"
-f"- Do not include your reasoning steps.\n"
-f"- Numeric fields must be decimals with at most 3 digits after the point.\n\n"
-f"IF DATA INSUFFICIENT\n"
-f'- If any list has fewer than {k} points, respond: {{"status":"insufficient_data","reason":"<reason>"}}\n\n'
-f"SCHEMA (must match exactly)\n"
-f"{{\n"
-f'  "status":"ok",\n'
-f'  "header": {header_json},\n'
-f'  "summary": {{\n'
-f'    "momentum_state":"rising"|"falling"|"neutral"|"mixed",\n'
-f'    "strength":"weak"|"moderate"|"strong",\n'
-f'    "pressure":"buying"|"selling"|"balanced",\n'
-f'    "confidence":0..1,\n'
-f'    "explanation":"Plain-language summary of current momentum and strength (no indicator names).",\n'
-f'    "rationale":"Concise reasoning (no indicator names)."\n'
-f'  }},\n'
-f'  "safety":{{"advice_compliance":"no_advice"}}\n'
-f"}}\n\n"
-f"Feature mapping:\n"
-f'{{\n'
-f'  "rsi": "Relative strength measure of market momentum",\n'
-f'  "slowk": "Short-term momentum oscillator component",\n'
-f'  "slowd": "Smoothed momentum reference",\n'
-f'  "roc": "Rate of price change (speed of movement)",\n'
-f'  "mfi": "Money flow strength combining price and volume"\n'
-f'}}\n\n'
-f"These mappings clarify feature meaning — do not restate them in your output.\n"
-f"Each array lists the most recent {k} sequential values from oldest → newest.\n\n"
-f"DECISION RULES\n"
-f"- If momentum measures increase together, classify as 'rising'.\n"
-f"- If they decline together, classify as 'falling'.\n"
-f"- Strength depends on magnitude and agreement (weak/moderate/strong).\n"
-f"- Pressure represents buyer vs seller dominance (buying/selling/balanced).\n"
-f"- Confidence is proportional to overall consistency.\n\n"
-f"NUMERIC DATA\n"
-f"{data_json}\n\n"
-f"HELPER FEATURES\n"
-f"{features_json}\n\n"
-f"Return only the JSON. Max 120 tokens."
-    )
+    prompt = f"""
+STRICT JSON ONLY. No markdown, no extra keys.
+If data insufficient: {{"status":"insufficient_data","reason":"<reason>"}}.
+
+Schema:
+{{
+  "status":"ok",
+  "header": {header_json},
+  "summary": {{
+    "momentum_state":"rising"|"falling"|"neutral"|"mixed",
+    "strength":"weak"|"moderate"|"strong",
+    "pressure":"buying"|"selling"|"balanced",
+    "confidence":0..1,
+    "explanation":"Plain-language (no indicator names).",
+    "rationale":"Concise numeric reasoning (no indicator names)."
+  }},
+  "safety":{{"advice_compliance":"no_advice"}}
+}}
+
+Rules:
+- Use ONLY numeric values below.
+- Momentum up/down based on consistent direction.
+- Strength = magnitude + agreement.
+- Pressure = buyer vs seller dominance.
+- Confidence < 1.0, based on numeric agreement.
+- No advice, predictions, or targets.
+
+DATA:
+{data_json}
+
+FEATURES:
+{features_json}
+
+Return STRICT JSON only.
+""".strip()
+
     return prompt
 
 
 @tool("volatility_range")
 def volatility_range(symbol: str) -> str:
     """
-    Build a **strict-JSON analysis prompt** for evaluating a stock’s *Volatility & Range* from cached OHLCV data.
-
-    Purpose
-    -------
-    For autonomous/semi-autonomous AI agents. This tool returns a **prompt string**; it does **not** provide advice.
-    The downstream LLM must summarize **volatility regime, absolute level, and current price location within a
-    dynamic range** using numeric series only.
-
-    Inputs
-    ------
-    symbol : str
-        Ticker used to fetch a cached pandas.DataFrame (Redis/RAG). Required columns:
-        ["Open","High","Low","Close","Volume"], time-ascending.
-
-    Data semantics
-    --------------
-    - Lookback: last **14 sessions**.
-    - Array order: **oldest → newest**.
-    - Values are decimals (≤ 3 dp). Non-numeric/NaN triggers insufficient-data.
-    - BBANDS configured with `MA_Type.T3` (documented for determinism).
-
-    Computed features (last 14)
-    ---------------------------
-    - atr                     : average true-range (volatility magnitude)
-    - bb_upper/middle/lower   : dynamic range envelope
-    - stddev_5                : short-horizon dispersion
-    Helper features:
-    - band_width, band_width_slope
-    - band_position (0=near lower band, 1=near upper band) derived from closes
-    - atr_slope, stddev_slope
-    - atr_z, stddev_z (normalized context)
-
-    Expected Output (LLM response)
-    ------------------------------
-    STRICT JSON matching exactly:
-      {
-        "status":"ok",
-        "header":{"symbol":<str>,"lookback_points":14},
-        "summary":{
-          "volatility_regime":"expanding"|"contracting"|"stable"|"mixed",
-          "volatility_level":"low"|"medium"|"high",
-          "relative_position":"near_high"|"near_low"|"mid_range",
-          "confidence":0..1,
-          "explanation":"Plain-language summary (no indicator names).",
-          "rationale":"Concise numeric reasoning (no indicator names)."
-        },
-        "safety":{"advice_compliance":"no_advice"}
-      }
-    If the first output violates the schema, the LLM must immediately return a corrected STRICT JSON.
-
-    Failure Modes
-    -------------
-    - If any required list has <14 points, return:
-      {"status":"insufficient_data","reason":"<reason>"}
-    - Upstream errors: cache miss, corrupt payloads, or bad schema.
-    - Guards: divide-by-zero protected for band width; NaNs rejected.
-
-    Guardrails & Runtime Hints
-    --------------------------
-    - No trading signals, predictions, targets, or instructions.
-    - Do not mention indicator names in explanation/rationale (feature mapping is for context only).
-    - Suggested LLM params: temperature ≤ 0.3, max_tokens ≈ 120.
+    Return a compact STRICT-JSON volatility-analysis prompt using cached OHLCV.
+    Summarizes volatility_regime, volatility_level, and relative_position.
+    No advice. No indicator names. Returns instruction prompt + numeric features.
     """
     k = 14
-    df = _fetch_finance_df_with_symbol(symbol=symbol)
+    df = get_price_history(symbol=symbol)
     close, high, low = df["Close"], df["High"], df["Low"]
 
-    # ---------- indicators ----------
-    atr = _tail(talib.ATR(high, low, close, timeperiod=14), k)
+    # Indicators
+    atr = tail(talib.ATR(high, low, close, 14), k)
     upper, middle, lower = talib.BBANDS(close, matype=MA_Type.T3)
-    upper, middle, lower = _tail(upper, k), _tail(middle, k), _tail(lower, k)
-    stdv5 = _tail(talib.STDDEV(close, timeperiod=5, nbdev=1), k)
+    upper, middle, lower = tail(upper, k), tail(middle, k), tail(lower, k)
+    stdv5 = tail(talib.STDDEV(close, timeperiod=5, nbdev=1), k)
 
-    # ---------- sanity checks ----------
+    # Required series
     lists = {
         "atr": atr,
         "bb_upper": upper,
@@ -426,563 +216,340 @@ def volatility_range(symbol: str) -> str:
         "bb_lower": lower,
         "stddev_5": stdv5,
     }
-    for key, val in lists.items():
-        if len(val) < k:
-            return json.dumps({"status": "insufficient_data", "reason": f"{key}_len<{k}"})
 
-    lists = {k_: _to_float_list(v, 3) for k_, v in lists.items()}
+    for key, v in lists.items():
+        if len(v) < k:
+            return json.dumps({"status":"insufficient_data","reason":f"{key}_len<{k}"})
 
-    # ---------- helper features ----------
-    # Band width & position (relative placement of price within bands)
-    bw = (np.array(lists["bb_upper"]) - np.array(lists["bb_lower"]))        # width
-    # Use last k closes to compute relative position; align with lists length k
+    # JSON-safe floats
+    lists = {k_: to_float_list(v, 3) for k_, v in lists.items()}
+
+    # Helper features
+    bw = np.array(lists["bb_upper"]) - np.array(lists["bb_lower"])  # band width
     recent_close = close.dropna().tail(k).values.astype(float)
-    # Avoid divide-by-zero
     denom = np.maximum(bw, 1e-12)
-    band_pos = np.clip((recent_close - np.array(lists["bb_lower"])) / denom, 0.0, 1.0)
+    pos = np.clip((recent_close - np.array(lists["bb_lower"])) / denom, 0.0, 1.0)
 
     helpers = {
-        "band_width": _to_float_list(bw, 3),
-        "band_width_slope": _slope(bw),
-        "band_position": _to_float_list(band_pos, 3),  # 0=near lower, 1=near upper
-        "atr_slope": _slope(lists["atr"]),
-        "stddev_slope": _slope(lists["stddev_5"]),
-        "atr_z": _z(lists["atr"]),
-        "stddev_z": _z(lists["stddev_5"]),
+        "band_width": to_float_list(bw, 3),
+        "band_width_slope": float(slope(bw)),
+        "band_position": to_float_list(pos, 3),
+        "atr_slope": float(slope(lists["atr"])),
+        "stddev_slope": float(slope(lists["stddev_5"])),
+        "atr_z": to_float_list(z(lists["atr"]), 3),
+        "stddev_z": to_float_list(z(lists["stddev_5"]), 3),
     }
 
-    data_json    = json.dumps(lists, separators=(",", ":"), ensure_ascii=False)
-    helpers_json = json.dumps({k:(v if isinstance(v, list) else float(v)) for k,v in helpers.items()},
-                              separators=(",", ":"), ensure_ascii=False)
-    header_json  = json.dumps({"symbol": symbol, "lookback_points": k}, separators=(",", ":"), ensure_ascii=False)
+    data_json = json.dumps(lists, separators=(",", ":"))
+    helpers_json = json.dumps(helpers, separators=(",", ":"))
+    header_json = json.dumps({"symbol": symbol, "lookback_points": k})
 
-    # ---------- final prompt ----------
-    prompt = (
-f'You are a market analysis model.\n'
-f'Use ONLY the numeric lists provided. Do NOT mention technical indicator names.\n'
-f'Assess recent volatility and trading range objectively. No advice, predictions, targets, or instructions.\n\n'
-f'OUTPUT REQUIREMENTS\n'
-f'- Respond with STRICT JSON using double quotes only, no markdown, no extra keys.\n'
-f'- Do not include your reasoning steps.\n'
-f'- Numeric fields must be decimals with at most 3 digits after the point.\n\n'
-f'IF DATA INSUFFICIENT\n'
-f'- If any list has fewer than {k} points, respond: {{"status":"insufficient_data","reason":"<reason>"}}\n\n'
-f'SCHEMA (must match exactly)\n'
-f'{{\n'
-f'  "status":"ok",\n'
-f'  "header": {header_json},\n'
-f'  "summary": {{\n'
-f'    "volatility_regime":"expanding"|"contracting"|"stable"|"mixed",\n'
-f'    "volatility_level":"low"|"medium"|"high",\n'
-f'    "relative_position":"near_high"|"near_low"|"mid_range",\n'
-f'    "confidence":0..1,\n'
-f'    "explanation":"Plain-language summary of volatility and range (no indicator names).",\n'
-f'    "rationale":"Concise reasoning (no indicator names)."\n'
-f'  }},\n'
-f'  "safety":{{"advice_compliance":"no_advice"}}\n'
-f'}}\n\n'
-f'Feature mapping:\n'
-f'{{\n'
-f'  "atr": "Average true range representing overall volatility magnitude",\n'
-f'  "bb_upper/bb_middle/bb_lower": "Dynamic range envelope capturing price extremes and mean reversion zone",\n'
-f'  "stddev_5": "Short-term statistical dispersion of closing prices"\n'
-f'}}\n\n'
-f'These mappings clarify feature meaning — do not restate them in your output.\n'
-f'Each array lists the most recent {k} sequential values from oldest → newest.\n\n'
-f'DECISION RULES\n'
-f'- If dispersion and spread measures are increasing together, set "volatility_regime":"expanding"; if decreasing, "contracting"; else "stable" or "mixed".\n'
-f'- Map "volatility_level" using recent magnitude of dispersion/spread vs its own history (low/medium/high).\n'
-f'- "range_state" reflects where recent prices sit within the dynamic range (near_high/near_low/mid_range).\n'
-f'- Confidence is proportional to agreement across measures; never 1.00.\n\n'
-f'NUMERIC DATA\n'
-f'{data_json}\n\n'
-f'HELPER FEATURES\n'
-f'{helpers_json}\n\n'
-f'Return only the JSON. Max 120 tokens.'
-    )
+    # ============ TPM SAFE PROMPT (compact) ============
+    prompt = f"""
+STRICT JSON ONLY. No markdown, no extra keys.
+If insufficient: {{"status":"insufficient_data","reason":"<reason>"}}.
+
+Schema:
+{{
+  "status":"ok",
+  "header": {header_json},
+  "summary": {{
+    "volatility_regime":"expanding"|"contracting"|"stable"|"mixed",
+    "volatility_level":"low"|"medium"|"high",
+    "relative_position":"near_high"|"near_low"|"mid_range",
+    "confidence":0..1,
+    "explanation":"Plain-language (no indicator names).",
+    "rationale":"Concise numeric reasoning (no indicator names)."
+  }},
+  "safety":{{"advice_compliance":"no_advice"}}
+}}
+
+Rules:
+- Use ONLY numeric values below.
+- Regime: dispersion ↑ = expanding; ↓ = contracting.
+- Level: recent magnitude vs own history.
+- Position: 0=lower band, 1=upper.
+- Confidence <1.0, based on numeric agreement.
+- No advice, predictions, or targets.
+
+DATA:
+{data_json}
+
+FEATURES:
+{helpers_json}
+
+Return STRICT JSON only.
+""".strip()
+
     return prompt
 
 
 @tool("volume_flow")
 def volume_flow(symbol: str) -> str:
     """
-    Build a **strict-JSON analysis prompt** for evaluating a stock’s *Volume & Flow* from cached OHLCV data.
-
-    Purpose
-    -------
-    For autonomous/semi-autonomous AI agents. This tool returns a **prompt string**; it does **not** provide advice.
-    The downstream LLM must summarize **trading activity, participation strength, and net flow** using numeric series only.
-
-    Inputs
-    ------
-    symbol : str
-        Ticker used to fetch a cached pandas.DataFrame (Redis/RAG). Required columns:
-        ["Open","High","Low","Close","Volume"], time-ascending.
-
-    Data semantics
-    --------------
-    - Lookback: last **14 sessions**.
-    - Array order: **oldest → newest**.
-    - Values are decimals (≤ 3 dp). Non-numeric/NaN triggers insufficient-data handling.
-
-    Computed features (last 14)
-    ---------------------------
-    - obv               : cumulative volume flow proxy
-    - ad                : accumulation/distribution flow proxy
-    - volume_ema_10/20  : short- and medium-horizon smoothed activity
-    Helper features:
-    - obv_slope, ad_slope, obv_z, ad_z
-    - volume_ratio = volume_ema_10 / volume_ema_20 (guarded for divide-by-zero)
-
-    Expected Output (LLM response)
-    ------------------------------
-    STRICT JSON matching exactly:
-      {
-        "status":"ok",
-        "header":{"symbol":<str>,"lookback_points":14},
-        "summary":{
-          "volume_trend":"increasing"|"decreasing"|"stable"|"mixed",
-          "flow_bias":"inflow"|"outflow"|"balanced",
-          "participation_strength":"weak"|"moderate"|"strong",
-          "confidence":0..1,
-          "explanation":"Plain-language summary (no indicator names).",
-          "rationale":"Concise numeric reasoning (no indicator names)."
-        },
-        "safety":{"advice_compliance":"no_advice"}
-      }
-    If the first output violates the schema, the LLM must immediately return a corrected STRICT JSON.
-
-    Failure Modes
-    -------------
-    - If any required list has <14 points, return:
-      {"status":"insufficient_data","reason":"<reason>"}
-    - Upstream errors: cache miss, corrupt payloads, or bad schema.
-    - Guards: zero/near-zero volume and divide-by-zero safely handled.
-
-    Guardrails & Runtime Hints
-    --------------------------
-    - No trading signals, predictions, targets, or instructions.
-    - Do not mention indicator names in explanation/rationale (feature mapping is for context only).
-    - Suggested LLM params: temperature ≤ 0.3, max_tokens ≈ 120.
+    Return a compact STRICT-JSON volume/flow analysis prompt from OHLCV.
+    Summarizes volume_trend, flow_bias, participation_strength, and confidence.
+    No advice. No indicator names.
     """
-    k: int = 14
-    df = _fetch_finance_df_with_symbol(symbol=symbol)
+    k = 14
+    df = get_price_history(symbol=symbol)
     close, high, low, vol = df["Close"], df["High"], df["Low"], df["Volume"]
 
-    obv = _tail(talib.OBV(close, vol), k)
-    ad  = _tail(talib.AD(high, low, close, vol), k)
-    volume_ema_10 = _tail(talib.EMA(vol, timeperiod=10), k)
-    volume_ema_20 = _tail(talib.EMA(vol, timeperiod=20), k)
+    # Indicators
+    obv = tail(talib.OBV(close, vol), k)
+    ad  = tail(talib.AD(high, low, close, vol), k)
+    v10 = tail(talib.EMA(vol, 10), k)
+    v20 = tail(talib.EMA(vol, 20), k)
 
-    # ---------- assemble lists ----------
+    # Required lists
     lists = {
         "obv": obv,
         "ad": ad,
-        "volume_ema_10": volume_ema_10,
-        "volume_ema_20": volume_ema_20,
+        "volume_ema_10": v10,
+        "volume_ema_20": v20,
     }
+    for key, v in lists.items():
+        if len(v) < k:
+            return json.dumps({"status": "insufficient_data", "reason": f"{key}_len<{k}"})
 
-    # ---------- sanity check ----------
-    for key, val in lists.items():
-        if len(val) < k:
-            return json.dumps({"status":"insufficient_data","reason":f"{key}_len<{k}"})
-    lists = {k_: _to_float_list(v, 3) for k_, v in lists.items()}
+    lists = {k_: to_float_list(v, 3) for k_, v in lists.items()}
 
-    # ---------- helper features ----------
+    # Helper features
     features = {
-        "obv_slope": _slope(lists["obv"]),
-        "ad_slope": _slope(lists["ad"]),
+        "obv_slope": float(slope(lists["obv"])),
+        "ad_slope": float(slope(lists["ad"])),
         "volume_ratio": round(lists["volume_ema_10"][-1] / (lists["volume_ema_20"][-1] + 1e-12), 3),
-        "obv_z": _z(lists["obv"]),
-        "ad_z": _z(lists["ad"]),
+        "obv_z": to_float_list(z(lists["obv"]), 3),
+        "ad_z": to_float_list(z(lists["ad"]), 3),
     }
 
-    data_json    = json.dumps(lists, separators=(",", ":"), ensure_ascii=False)
-    helpers_json = json.dumps({k:(v if isinstance(v, list) else float(v)) for k,v in features.items()},
-                              separators=(",", ":"), ensure_ascii=False)
-    header_json  = json.dumps({"symbol": symbol, "lookback_points": k}, separators=(",", ":"), ensure_ascii=False)
+    data_json = json.dumps(lists, separators=(",", ":"))
+    features_json = json.dumps(features, separators=(",", ":"))
+    header_json = json.dumps({"symbol": symbol, "lookback_points": k})
 
-    # ---------- final prompt ----------
-    prompt = (
-f'You are a market analysis model.\n'
-f'Use ONLY the numeric lists provided. Do NOT mention technical indicator names.\n'
-f'Assess trading activity, participation strength, and capital flow objectively. No advice, predictions, or targets.\n\n'
-f'OUTPUT REQUIREMENTS\n'
-f'- Respond with STRICT JSON using double quotes only, no markdown, no extra keys.\n'
-f'- Do not include reasoning steps.\n'
-f'- Numeric fields must be decimals with at most 3 digits after the point.\n\n'
-f'IF DATA INSUFFICIENT\n'
-f'- If any list has fewer than {k} points, respond: {{"status":"insufficient_data","reason":"<reason>"}}\n\n'
-f'SCHEMA (must match exactly)\n'
-f'{{\n'
-f'  "status":"ok",\n'
-f'  "header": {header_json},\n'
-f'  "summary": {{\n'
-f'    "volume_trend":"increasing"|"decreasing"|"stable"|"mixed",\n'
-f'    "flow_bias":"inflow"|"outflow"|"balanced",\n'
-f'    "participation_strength":"weak"|"moderate"|"strong",\n'
-f'    "confidence":0..1,\n'
-f'    "explanation":"Plain-language summary of market volume and flow (no indicator names).",\n'
-f'    "rationale":"Concise reasoning (no indicator names)."\n'
-f'  }},\n'
-f'  "safety":{{"advice_compliance":"no_advice"}}\n'
-f'}}\n\n'
-f'Feature mapping:\n'
-f'{{\n'
-f'  "obv": "Cumulative volume measure confirming price-direction flow",\n'
-f'  "ad": "Volume-weighted accumulation/distribution line capturing inflow vs outflow",\n'
-f'  "volume_ema_10/20": "Smoothed short- and medium-term trading activity averages"\n'
-f'}}\n\n'
-f'These mappings clarify feature meaning — do not restate them in your output.\n'
-f'Each array lists the most recent {k} sequential values from oldest → newest.\n\n'
-f'DECISION RULES\n'
-f'- If cumulative volume measures rise together, classify as inflow with increasing participation.\n'
-f'- If they decline together, classify as outflow with fading participation.\n'
-f'- Compare short vs long volume averages to determine rising or falling activity.\n'
-f'- Confidence is proportional to consistency among signals; never 1.00.\n\n'
-f'NUMERIC DATA\n'
-f'{data_json}\n\n'
-f'HELPER FEATURES\n'
-f'{helpers_json}\n\n'
-f'Return only the JSON. Max 120 tokens.'
-    )
+    # ============= TPM-SAFE COMPACT PROMPT =================
+    prompt = f"""
+STRICT JSON ONLY. No markdown, no extra keys.
+If insufficient: {{"status":"insufficient_data","reason":"<reason>"}}.
+
+Schema:
+{{
+  "status":"ok",
+  "header": {header_json},
+  "summary": {{
+    "volume_trend":"increasing"|"decreasing"|"stable"|"mixed",
+    "flow_bias":"inflow"|"outflow"|"balanced",
+    "participation_strength":"weak"|"moderate"|"strong",
+    "confidence":0..1,
+    "explanation":"Plain-language (no indicator names).",
+    "rationale":"Concise numeric reasoning (no indicator names)."
+  }},
+  "safety":{{"advice_compliance":"no_advice"}}
+}}
+
+Rules:
+- Use ONLY numeric values below.
+- Volume trend: compare short vs long activity and slopes.
+- Flow bias: agree between obv/ad direction (inflow/outflow).
+- Participation strength: magnitude + consistency.
+- Confidence < 1.0, based on agreement.
+- No advice, predictions, or targets.
+
+DATA:
+{data_json}
+
+FEATURES:
+{features_json}
+
+Return STRICT JSON only.
+""".strip()
+
     return prompt
 
 
 @tool("market_structure")
 def market_structure(symbol: str) -> str:
     """
-    Build a **strict-JSON analysis prompt** for evaluating a stock’s *Market Structure & Price Action* from cached OHLCV data.
-
-    Purpose
-    -------
-    For autonomous/semi-autonomous AI agents. This tool returns a **prompt string**; it does **not** analyze or advise.
-    The downstream LLM must summarize **structure, directional bias, price location within range, and key levels** using
-    numeric series only.
-
-    Inputs
-    ------
-    symbol : str
-        Ticker used to fetch a cached pandas.DataFrame (Redis/RAG). Required columns:
-        ["Open","High","Low","Close","Volume"], time-ascending.
-
-    Data semantics
-    --------------
-    - Lookback: last **14 sessions**.
-    - Array order: **oldest → newest**.
-    - Values are decimals (≤ 3 dp). Non-numeric/NaN triggers insufficient-data handling.
-
-    What it computes (last 14)
-    --------------------------
-    - Local swings: recent swing highs/lows (neighborhood window=3)
-    - Range & position: rolling high–low width; normalized price_position in [0,1] (0=near low, 1=near high)
-    - Candle shape: body_ratio, upper_wick_ratio, lower_wick_ratio (0..1)
-    - Gaps: gap_up/gap_down flags vs prior close
-    - Efficiency: net move / path length (0..1) for directionality
-    - Key levels: histogram-clustered support/resistance from recent swing points (top 3 each)
-    Helper features: range_width_slope, price_position_last, efficiency_last, gap rates, swing counts, z-scores.
-
-    Expected Output (LLM response)
-    ------------------------------
-    STRICT JSON matching exactly:
-      {
-        "status":"ok",
-        "header":{"symbol":<str>,"lookback_points":14},
-        "summary":{
-          "structure":"trend"|"range"|"transition"|"mixed",
-          "bias":"up"|"down"|"neutral"|"mixed",
-          "price_position":"near_high"|"near_low"|"mid_range",
-          "key_levels":{"support":[number,...],"resistance":[number,...]},
-          "confidence":0..1,
-          "explanation":"Plain-language summary (no indicator names).",
-          "rationale":"Concise numeric reasoning (no indicator names)."
-        },
-        "safety":{"advice_compliance":"no_advice"}
-      }
-    If the first output violates the schema, the LLM must immediately return a corrected STRICT JSON.
-
-    Decision rules (guidance to the LLM)
-    ------------------------------------
-    - Structure: higher efficiency with widening range and directional swing sequence ⇒ “trend”; low efficiency with
-      tight, mean-reverting range ⇒ “range”; conflicting signals ⇒ “transition” or “mixed”.
-    - Bias: favor the side with more recent higher highs vs lower lows, upward vs downward price_position drift,
-      and body_ratio alignment; gaps can reinforce bias if consistent.
-    - Price location: map last price_position to “near_high” (≥0.66), “mid_range” (0.33–0.66), or “near_low” (<0.33).
-    - Confidence: proportional to agreement/magnitude across features; never 1.00.
-
-    Failure Modes
-    -------------
-    - If any required list has <14 points, return:
-      {"status":"insufficient_data","reason":"<reason>"}
-    - Guards: divide-by-zero protected for range width; NaNs rejected; clustering uses densest histogram bins.
-
-    Compliance & Runtime Hints
-    --------------------------
-    - No trading signals, predictions, targets, or instructions.
-    - Do not mention indicator names in explanation/rationale (feature mapping is for context only).
-    - Suggested LLM params: temperature ≤ 0.3, max_tokens ≈ 120.
+    Return a compact STRICT-JSON market-structure prompt from OHLCV.
+    Summarizes structure, bias, price_position, key_levels, and confidence.
+    No advice. No indicator names.
     """
-    df = _fetch_finance_df_with_symbol(symbol=symbol)
+    df = get_price_history(symbol=symbol)
     k = 14
 
     o, h, l, c = df["Open"], df["High"], df["Low"], df["Close"]
 
-    # --- Local swings (window=3) -> 1 for swing, 0 otherwise
+    # --- Swings (window=3)
     swing_high_mask = (h.shift(1) < h) & (h.shift(-1) < h)
     swing_low_mask  = (l.shift(1) > l) & (l.shift(-1) > l)
     swing_high_vals = h.where(swing_high_mask)
     swing_low_vals  = l.where(swing_low_mask)
 
-    # --- Range/position helpers
-    recent_high = h.rolling(window=k, min_periods=1).max()
-    recent_low  = l.rolling(window=k, min_periods=1).min()
+    # --- Range + Position
+    recent_high = h.rolling(k, min_periods=1).max()
+    recent_low  = l.rolling(k, min_periods=1).min()
     rng = recent_high - recent_low
-    price_pos = np.clip((c - recent_low) / (rng.replace(0, np.nan)).fillna(1e-12), 0.0, 1.0)  # 0=low,1=high
+    price_pos = np.clip((c - recent_low) / (rng.replace(0, np.nan)).fillna(1e-12), 0, 1)
 
-    # --- Candle shape (body/wicks ratios)
-    true_range = (h - l).replace(0, 1e-12)
+    # --- Candle shape
+    tr = (h - l).replace(0, 1e-12)
     body = (c - o).abs()
-    upper_wick = (h - np.maximum(o, c))
-    lower_wick = (np.minimum(o, c) - l)
-    body_ratio = (body / true_range).clip(0, 1)
-    upper_wick_ratio = (upper_wick / true_range).clip(0, 1)
-    lower_wick_ratio = (lower_wick / true_range).clip(0, 1)
+    upper = (h - np.maximum(o, c))
+    lower = (np.minimum(o, c) - l)
+    body_ratio = (body / tr).clip(0, 1)
+    uw = (upper / tr).clip(0, 1)
+    lw = (lower / tr).clip(0, 1)
 
-    # --- Gaps vs prior close
+    # --- Gaps
     prev_close = c.shift(1)
-    gap = o - prev_close
-    gap_up = (gap > 0).astype(int)
-    gap_down = (gap < 0).astype(int)
+    gap_up = ((o - prev_close) > 0).astype(int)
+    gap_down = ((o - prev_close) < 0).astype(int)
 
-    # --- Efficiency ratio (price path directionality)
+    # --- Efficiency
     net_change = (c - c.shift(k)).abs()
-    path = (c.diff().abs().rolling(k).sum())
-    efficiency = (net_change / path.replace(0, np.nan)).fillna(0.0).clip(0, 1)
+    path = c.diff().abs().rolling(k).sum().replace(0, np.nan)
+    efficiency = (net_change / path).fillna(0).clip(0, 1)
 
-    # --- Simple clustering of support/resistance from last ~100 swings
-    def _cluster_levels(vals: pd.Series, n_levels: int = 3) -> list:
+    # --- Simple support/resistance clustering
+    def _cluster(vals, n=3):
         x = vals.dropna().tail(100).values.astype(float)
         if x.size == 0:
             return []
-        # histogram-based clustering: pick densest bins (20 bins)
         hist, edges = np.histogram(x, bins=20)
-        idx = hist.argsort()[::-1][:n_levels]
-        centers = [(edges[i] + edges[i+1]) / 2.0 for i in idx]
-        centers = sorted([round(float(v), 3) for v in centers])
-        return centers
+        idx = hist.argsort()[::-1][:n]
+        centers = [(edges[i] + edges[i+1]) / 2 for i in idx]
+        return sorted([round(float(v), 3) for v in centers])
 
-    supports   = _cluster_levels(swing_low_vals, n_levels=3)
-    resistances= _cluster_levels(swing_high_vals, n_levels=3)
+    supports = _cluster(swing_low_vals)
+    resistances = _cluster(swing_high_vals)
 
-    # --- Assemble lists (last k points)
+    # --- Lists (last k points)
     lists = {
-        "highs":          _tail(h, k),
-        "lows":           _tail(l, k),
-        "closes":         _tail(c, k),
-        "range_width":    _tail(rng, k),
-        "price_position": _tail(price_pos, k),       # 0..1 within recent range
-        "body_ratio":     _tail(body_ratio, k),      # 0..1
-        "upper_wick_ratio": _tail(upper_wick_ratio, k),
-        "lower_wick_ratio": _tail(lower_wick_ratio, k),
-        "gap_up":         _tail(gap_up, k),          # 0/1
-        "gap_down":       _tail(gap_down, k),        # 0/1
-        "swing_highs":    _tail(swing_high_vals.fillna(np.nan), k), 
-        "swing_lows":     _tail(swing_low_vals.fillna(np.nan), k),
-        "efficiency":     _tail(efficiency, k),      # 0..1 (closer to 1 = directional)
+        "highs":          tail(h, k),
+        "lows":           tail(l, k),
+        "closes":         tail(c, k),
+        "range_width":    tail(rng, k),
+        "price_position": tail(price_pos, k),
+        "body_ratio":     tail(body_ratio, k),
+        "upper_wick_ratio": tail(uw, k),
+        "lower_wick_ratio": tail(lw, k),
+        "gap_up":         tail(gap_up, k),
+        "gap_down":       tail(gap_down, k),
+        "swing_highs":    tail(swing_high_vals, k),
+        "swing_lows":     tail(swing_low_vals, k),
+        "efficiency":     tail(efficiency, k),
     }
 
-    # sanity check
     for key, arr in lists.items():
         if len(arr) < k:
             return json.dumps({"status":"insufficient_data","reason":f"{key}_len<{k}"})
 
-    # --- Helper features for the LLM
+    # --- Helper features
     helpers = {
-        "range_width_slope": _slope(lists["range_width"]),
-        "price_position_last": round(float(lists["price_position"][-1]), 3),
-        "efficiency_last":     round(float(lists["efficiency"][-1]), 3),
-        "gap_rate_up":   round(float(np.mean(lists["gap_up"])), 3),
-        "gap_rate_down": round(float(np.mean(lists["gap_down"])), 3),
-        "swing_high_count": int(np.isfinite(np.array(lists["swing_highs"], float)).sum()),
-        "swing_low_count":  int(np.isfinite(np.array(lists["swing_lows"], float)).sum()),
+        "range_width_slope": slope(lists["range_width"]),
+        "price_position_last": float(lists["price_position"][-1]),
+        "efficiency_last": float(lists["efficiency"][-1]),
+        "gap_rate_up": float(np.mean(lists["gap_up"])),
+        "gap_rate_down": float(np.mean(lists["gap_down"])),
+        "swing_high_count": int(pd.Series(lists["swing_highs"]).count()),
+        "swing_low_count": int(pd.Series(lists["swing_lows"]).count()),
         "support_levels": supports,
         "resistance_levels": resistances,
-        "range_width_z": _z(lists["range_width"]),
-        "body_ratio_z":  _z(lists["body_ratio"]),
+        "range_width_z": to_float_list(z(lists["range_width"]), 3),
+        "body_ratio_z": to_float_list(z(lists["body_ratio"]), 3),
     }
 
-    data_json    = json.dumps(lists, separators=(",", ":"), ensure_ascii=False)
-    helpers_json = json.dumps(helpers, separators=(",", ":"), ensure_ascii=False)
-    header_json  = json.dumps({"symbol": symbol, "lookback_points": k}, separators=(",", ":"), ensure_ascii=False)
+    data_json    = json.dumps({k: to_float_list(v, 3) for k, v in lists.items()},
+                              separators=(",", ":"))
+    helpers_json = json.dumps(helpers, separators=(",", ":"))
+    header_json  = json.dumps({"symbol": symbol, "lookback_points": k})
 
-    return (
-f'You are a market analysis model.\n'
-f'Use ONLY the numeric lists provided. Do NOT mention technical indicator names.\n'
-f'Assess market structure and price action objectively (structure, bias, key levels, and location within range). No advice, predictions, or targets.\n\n'
-f'OUTPUT REQUIREMENTS\n'
-f'- Respond with STRICT JSON using double quotes only, no markdown, no extra keys.\n'
-f'- Do not include reasoning steps.\n'
-f'- Numeric fields must be decimals with at most 3 digits after the point.\n\n'
-f'IF DATA INSUFFICIENT\n'
-f'- If any list has fewer than {k} points, respond: {{"status":"insufficient_data","reason":"<reason>"}}\n\n'
-f'SCHEMA (must match exactly)\n'
-f'{{\n'
-f'  "status":"ok",\n'
-f'  "header": {header_json},\n'
-f'  "summary": {{\n'
-f'    "structure":"trend"|"range"|"transition"|"mixed",\n'
-f'    "bias":"up"|"down"|"neutral"|"mixed",\n'
-f'    "price_position":"near_high"|"near_low"|"mid_range",\n'
-f'    "key_levels":{{"support":[number,...],"resistance":[number,...]}},\n'
-f'    "confidence":0..1,\n'
-f'    "explanation":"Plain-language summary of recent market structure (no indicator names).",\n'
-f'    "rationale":"Concise numeric reasoning (no indicator names)."\n'
-f'  }},\n'
-f'  "safety":{{"advice_compliance":"no_advice"}}\n'
-f'}}'
-f'Feature mapping:\n'
-f'{{\n'
-f'  "highs/lows/closes": "Recent session extremes and settlements",\n'
-f'  "range_width": "Rolling high–low distance capturing breadth of movement",\n'
-f'  "price_position": "Normalized location within recent range (0=near low, 1=near high)",\n'
-f'  "body_ratio": "Candle body size as a share of full session range (0..1)",\n'
-f'  "upper_wick_ratio/lower_wick_ratio": "Upper/lower shadow size as share of range (0..1)",\n'
-f'  "gap_up/gap_down": "Binary open vs prior close jumps (1=yes, 0=no)",\n'
-f'  "swing_highs/swing_lows": "Local extrema values from neighborhood comparison",\n'
-f'  "efficiency": "Directional efficiency (net move / path length, 0..1)"\n'
-f'}}\n\n'
-f'These mappings clarify feature meaning — do not restate them in your output.\n'
-f'Each array lists the most recent {k} sequential values from oldest → newest.\n\n'
-f'DECISION RULES\n'
-f'- If cumulative volume measures rise together, classify as inflow with increasing participation.\n'
-f'- If they decline together, classify as outflow with fading participation.\n'
-f'- Compare short vs long volume averages to determine rising or falling activity.\n'
-f'- Confidence is proportional to consistency among signals; never 1.00.\n\n'
-f'NUMERIC DATA\n'
-f'{data_json}\n\n'
-f'HELPER FEATURES\n'
-f'{helpers_json}\n\n'
-f'Return only the JSON. Max 120 tokens.')
+    prompt = f"""
+STRICT JSON ONLY. No markdown, no extra keys.
+If insufficient: {{"status":"insufficient_data","reason":"<reason>"}}.
+
+Schema:
+{{
+  "status":"ok",
+  "header": {header_json},
+  "summary": {{
+    "structure":"trend"|"range"|"transition"|"mixed",
+    "bias":"up"|"down"|"neutral"|"mixed",
+    "price_position":"near_high"|"near_low"|"mid_range",
+    "key_levels":{{"support":[number,...],"resistance":[number,...]}},
+    "confidence":0..1,
+    "explanation":"Plain-language (no indicator names).",
+    "rationale":"Concise numeric reasoning (no indicator names)."
+  }},
+  "safety":{{"advice_compliance":"no_advice"}}
+}}
+
+Rules:
+- Use ONLY numeric values below.
+- Structure: efficiency + swing patterns + range width direction.
+- Bias: higher highs vs lower lows, drift in price_position.
+- Price_position: last value → near_low (<0.33), mid_range (0.33–0.66), near_high (>=0.66).
+- Key levels: use provided support/resistance arrays.
+- Confidence < 1.0, based on agreement.
+- No advice, predictions, or targets.
+
+DATA:
+{data_json}
+
+FEATURES:
+{helpers_json}
+
+Return STRICT JSON only.
+""".strip()
+
+    return prompt
 
 
 @tool("liquidity_participation")
 def liquidity_participation(symbol: str) -> str:
     """
-    Build a **strict-JSON analysis prompt** for evaluating a stock’s *Liquidity & Participation Quality*
-    from cached OHLCV and microstructure data.
-
-    Purpose
-    -------
-    For autonomous/semi-autonomous AI agents. This tool returns a **prompt string**; it does **not** analyze or advise.
-    The downstream LLM must summarize **liquidity level, spread tightness, and participation quality** using numeric series only.
-
-    Inputs
-    ------
-    symbol : str
-        Ticker used to fetch a cached pandas.DataFrame (Redis/RAG). Required columns (time-ascending):
-        ["Open","High","Low","Close","Volume"].
-        Optional columns if available:
-        - "Float" (shares float) for turnover ratio
-        - "Trades" (count of executed prints) for average trade size
-        - "Bid","Ask" for direct spread; otherwise a high–low proxy is used
-        - "TickVolume" if you store it as a proxy for prints
-
-    Data semantics
-    --------------
-    - Lookback: last **14 sessions**.
-    - Array order: **oldest → newest**.
-    - Values are decimals (≤ 3 dp). Non-numeric/NaN triggers insufficient-data handling.
-
-    What it computes (last 14)
-    --------------------------
-    - turnover_ratio      : Volume / Float  (requires Float > 0)
-    - dollar_volume       : Close * Volume  (USD notional proxy)
-    - spread_proxy        : (Ask−Bid)/mid if Bid/Ask available; else (High−Low)/max(Close,1e-12)
-    - volume_volatility   : rolling std of Volume (normalized by its mean)
-    - avg_trade_size      : Volume / Trades (if Trades>0); else uses Volume / TickVolume if available
-    Helper features: slopes (turnover_slope, spread_slope, dv_slope), last values, and z-scores.
-
-    Expected Output (LLM response)
-    ------------------------------
-    STRICT JSON matching exactly:
-      {
-        "status":"ok",
-        "header":{"symbol":<str>,"lookback_points":14},
-        "summary":{
-          "liquidity_level":"low"|"medium"|"high",
-          "spread_state":"tight"|"normal"|"wide",
-          "participation_quality":"institutional"|"retail"|"mixed"|"insufficient",
-          "confidence":0..1,
-          "explanation":"Plain-language summary (no indicator names).",
-          "rationale":"Concise numeric reasoning (no indicator names)."
-        },
-        "safety":{"advice_compliance":"no_advice"}
-      }
-    If the first output violates the schema, the LLM must immediately return a corrected STRICT JSON.
-
-    Decision rules (guidance to the LLM)
-    ------------------------------------
-    - Liquidity level: use dollar_volume and turnover_ratio direction/magnitude (higher ⇒ “high”).
-    - Spread state: smaller, consistent spread_proxy ⇒ “tight”; larger and widening ⇒ “wide”.
-    - Participation quality: larger & rising avg_trade_size with steady turnover ⇒ “institutional”;
-      very small/volatile avg_trade_size ⇒ “retail”; mixed evidence ⇒ “mixed”; missing prints ⇒ “insufficient”.
-    - Confidence: proportional to agreement/magnitude across features; never 1.00.
-
-    Failure Modes
-    -------------
-    - If **dollar_volume**, **spread_proxy**, or **volume_volatility** have <14 points →:
-      {"status":"insufficient_data","reason":"core_features_len<14"}
-    - turnover_ratio and avg_trade_size may be absent; we still proceed, but mark in helpers and allow
-      the LLM to return “insufficient” for participation_quality if needed.
-    - Guards: divide-by-zero for Float/Trades, NaNs rejected, bid/ask fallback to high–low proxy.
-
-    Compliance & Runtime Hints
-    --------------------------
-    - No trading signals, predictions, targets, or instructions.
-    - Do not mention indicator names in explanation/rationale (feature mapping is for context only).
-    - Suggested LLM params: temperature ≤ 0.3, max_tokens ≈ 120.
+    Compact STRICT-JSON liquidity/participation analysis prompt from OHLCV + optional microstructure data.
+    Outputs liquidity_level, spread_state, participation_quality, and confidence. No advice. No indicator names.
     """
-
     k = 14
-    df = _fetch_finance_df_with_symbol(symbol=symbol)  # your cache fetcher
+    df = get_price_history(symbol=symbol)
 
-    # Required fields
+    # Required OHLCV
     close = pd.to_numeric(df["Close"], errors="coerce")
     high  = pd.to_numeric(df["High"], errors="coerce")
     low   = pd.to_numeric(df["Low"], errors="coerce")
     vol   = pd.to_numeric(df["Volume"], errors="coerce")
 
-    # Optional fields
-    flt   = pd.to_numeric(df.get("Float", pd.Series(index=df.index, dtype=float)), errors="coerce")
-    trades = pd.to_numeric(df.get("Trades", pd.Series(index=df.index, dtype=float)), errors="coerce")
-    tickv  = pd.to_numeric(df.get("TickVolume", pd.Series(index=df.index, dtype=float)), errors="coerce")
-    bid    = pd.to_numeric(df.get("Bid", pd.Series(index=df.index, dtype=float)), errors="coerce")
-    ask    = pd.to_numeric(df.get("Ask", pd.Series(index=df.index, dtype=float)), errors="coerce")
+    # Optional microstructure inputs
+    flt    = pd.to_numeric(df.get("Float", pd.Series(index=df.index)), errors="coerce")
+    trades = pd.to_numeric(df.get("Trades", pd.Series(index=df.index)), errors="coerce")
+    tickv  = pd.to_numeric(df.get("TickVolume", pd.Series(index=df.index)), errors="coerce")
+    bid    = pd.to_numeric(df.get("Bid", pd.Series(index=df.index)), errors="coerce")
+    ask    = pd.to_numeric(df.get("Ask", pd.Series(index=df.index)), errors="coerce")
 
-    # --- Core features ---
+    # --- Core metrics ---
     dollar_volume = close * vol
 
-    # Spread proxy preference: direct bid/ask if available, else high-low/close
-    has_ba = bid.notna().any() and ask.notna().any()
-    if has_ba:
-        mid = ((bid + ask) / 2.0).replace(0, np.nan)
+    # Spread: prefer Bid/Ask if present
+    if bid.notna().any() and ask.notna().any():
+        mid = ((bid + ask) / 2).replace(0, np.nan)
         spread_proxy = ((ask - bid) / mid).replace([np.inf, -np.inf], np.nan)
     else:
         denom = np.maximum(close.replace(0, np.nan), 1e-12)
         spread_proxy = ((high - low) / denom).replace([np.inf, -np.inf], np.nan)
 
-    # Volume volatility (normalized sigma)
+    # Volume volatility
     vol_sigma = vol.rolling(20, min_periods=5).std()
     vol_mu    = vol.rolling(20, min_periods=5).mean().replace(0, np.nan)
     volume_volatility = (vol_sigma / vol_mu).replace([np.inf, -np.inf], np.nan)
 
-    # Turnover ratio (optional)
+    # Optional: turnover ratio
     turnover_ratio = None
     if flt.notna().sum() > 0:
         denom = flt.replace(0, np.nan)
         turnover_ratio = (vol / denom).replace([np.inf, -np.inf], np.nan)
 
-    # Avg trade size (optional)
+    # Optional: avg trade size
     avg_trade_size = None
     if trades.notna().sum() > 0:
         denom = trades.replace(0, np.nan)
@@ -991,396 +558,223 @@ def liquidity_participation(symbol: str) -> str:
         denom = tickv.replace(0, np.nan)
         avg_trade_size = (vol / denom).replace([np.inf, -np.inf], np.nan)
 
-    # Assemble mandatory lists
+    # --- Assemble lists ---
     lists = {
-        "dollar_volume": _tail(dollar_volume),
-        "spread_proxy":  _tail(spread_proxy),
-        "volume_volatility": _tail(volume_volatility),
+        "dollar_volume":     tail(dollar_volume, k),
+        "spread_proxy":      tail(spread_proxy, k),
+        "volume_volatility": tail(volume_volatility, k),
     }
-
-    # Optional lists
     if turnover_ratio is not None:
-        lists["turnover_ratio"] = _tail(turnover_ratio)
+        lists["turnover_ratio"] = tail(turnover_ratio, k)
     if avg_trade_size is not None:
-        lists["avg_trade_size"] = _tail(avg_trade_size)
+        lists["avg_trade_size"] = tail(avg_trade_size, k)
 
-    # Sanity: core features must be present
-    core_keys = ["dollar_volume", "spread_proxy", "volume_volatility"]
-    for key in core_keys:
-        if len(lists.get(key, [])) < k:
-            return json.dumps({"status":"insufficient_data","reason":"core_features_len<14"})
+    # Required core lists must have 14 points
+    for ck in ["dollar_volume", "spread_proxy", "volume_volatility"]:
+        if len(lists.get(ck, [])) < k:
+            return json.dumps({"status": "insufficient_data", "reason": "core_features_len<14"})
 
-    # Round/float-cast
-    lists = {k_: _to_float_list(v, 3) for k_, v in lists.items()}
+    # JSON-safe floats
+    lists = {k: to_float_list(v, 3) for k, v in lists.items()}
 
-    # Helpers
+    # --- Helper features ---
     helpers = {
-        "dv_slope": _slope(lists["dollar_volume"]),
-        "spread_slope": _slope(lists["spread_proxy"]),
-        "volvol_slope": _slope(lists["volume_volatility"]),
-        "dv_z": _z(lists["dollar_volume"]),
-        "spread_z": _z(lists["spread_proxy"]),
-        "volvol_z": _z(lists["volume_volatility"]),
-        "turnover_slope": _slope(lists["turnover_ratio"]) if "turnover_ratio" in lists else None,
-        "avg_trade_size_slope": _slope(lists["avg_trade_size"]) if "avg_trade_size" in lists else None,
+        "dv_slope": float(slope(lists["dollar_volume"])),
+        "spread_slope": float(slope(lists["spread_proxy"])),
+        "volvol_slope": float(slope(lists["volume_volatility"])),
+        "dv_z": to_float_list(z(lists["dollar_volume"]), 3),
+        "spread_z": to_float_list(z(lists["spread_proxy"]), 3),
+        "volvol_z": to_float_list(z(lists["volume_volatility"]), 3),
+        "turnover_slope": float(slope(lists["turnover_ratio"])) if "turnover_ratio" in lists else None,
+        "avg_trade_size_slope": float(slope(lists["avg_trade_size"])) if "avg_trade_size" in lists else None,
         "has_turnover": int("turnover_ratio" in lists),
         "has_avg_trade_size": int("avg_trade_size" in lists),
     }
 
-    # JSON blocks
-    data_json    = json.dumps(lists, separators=(",", ":"), ensure_ascii=False)
-    helpers_json = json.dumps({k:(v if not isinstance(v, np.floating) else float(v)) for k,v in helpers.items()},
-                              separators=(",", ":"), ensure_ascii=False)
-    header_json  = json.dumps({"symbol": symbol, "lookback_points": k}, separators=(",", ":"), ensure_ascii=False)
+    data_json    = json.dumps(lists, separators=(",", ":"))
+    helpers_json = json.dumps(helpers, separators=(",", ":"))
+    header_json  = json.dumps({"symbol": symbol, "lookback_points": k})
+    prompt = f"""
+STRICT JSON ONLY. No markdown, no extra keys.
+If insufficient: {{"status":"insufficient_data","reason":"<reason>"}}.
 
-    # Prompt
-    return (
-f'You are a market analysis model.\n'
-f'Use ONLY the numeric lists provided. Do NOT mention technical indicator names.\n'
-f'Assess liquidity level, spread tightness, and participation quality objectively. No advice, predictions, or targets.\n\n'
-f'OUTPUT REQUIREMENTS\n'
-f'- Respond with STRICT JSON using double quotes only, no markdown, no extra keys.\n'
-f'- Do not include reasoning steps.\n'
-f'- Numeric fields must be decimals with at most 3 digits after the point.\n\n'
-f'IF DATA INSUFFICIENT\n'
-f'- If any core list has fewer than {k} points, respond: {{"status":"insufficient_data","reason":"<reason>"}}\n\n'
-f'SCHEMA (must match exactly)\n'
-f'{{\n'
-f'  "status":"ok",\n'
-f'  "header": {header_json},\n'
-f'  "summary": {{\n'
-f'    "liquidity_level":"low"|"medium"|"high",\n'
-f'    "spread_state":"tight"|"normal"|"wide",\n'
-f'    "participation_quality":"institutional"|"retail"|"mixed"|"insufficient",\n'
-f'    "confidence":0..1,\n'
-f'    "explanation":"Plain-language summary (no indicator names).",\n'
-f'    "rationale":"Concise numeric reasoning (no indicator names)."\n'
-f'  }},\n'
-f'  "safety":{{"advice_compliance":"no_advice"}}\n'
-f'}}\n\n'
-f'Feature mapping:\n'
-f'{{\n'
-f'  "dollar_volume":"Close×Volume (notional trading activity proxy)",\n'
-f'  "turnover_ratio":"Volume divided by free float (trading intensity)",\n'
-f'  "spread_proxy":"Quoted spread over mid or high–low/Close proxy (tightness)",\n'
-f'  "volume_volatility":"Normalized standard deviation of Volume (crowding/quiet)",\n'
-f'  "avg_trade_size":"Volume per trade (institutional vs retail footprint proxy)"\n'
-f'}}\n\n'
-f'These mappings clarify feature meaning — do not restate them in your output.\n'
-f'Each array lists the most recent {k} sequential values from oldest → newest.\n\n'
-f'DECISION RULES\n'
-f'- Liquidity level: use dollar_volume trend/level and turnover_ratio (if present).\n'
-f'- Spread state: map spread_proxy magnitude and slope to tight/normal/wide.\n'
-f'- Participation quality: infer from avg_trade_size level/consistency; if missing, return "insufficient".\n'
-f'- Confidence is proportional to agreement and magnitude across features; never 1.00.\n\n'
-f'NUMERIC DATA\n'
-f'{data_json}\n\n'
-f'HELPER FEATURES\n'
-f'{helpers_json}\n\n'
-f'Return only the JSON. Max 120 tokens.'
-    )
+Schema:
+{{
+  "status":"ok",
+  "header": {header_json},
+  "summary": {{
+    "liquidity_level":"low"|"medium"|"high",
+    "spread_state":"tight"|"normal"|"wide",
+    "participation_quality":"institutional"|"retail"|"mixed"|"insufficient",
+    "confidence":0..1,
+    "explanation":"Plain-language (no indicator names).",
+    "rationale":"Concise numeric reasoning (no indicator names)."
+  }},
+  "safety":{{"advice_compliance":"no_advice"}}
+}}
+
+Rules:
+- Use ONLY numeric values below.
+- Liquidity level: based on dollar_volume level/slope and turnover_ratio if present.
+- Spread_state: magnitude + direction of spread_proxy.
+- Participation_quality: use avg_trade_size consistency/level; if absent → "insufficient".
+- Confidence <1.0 and based on agreement.
+- No predictions or advice.
+
+DATA:
+{data_json}
+
+FEATURES:
+{helpers_json}
+
+Return STRICT JSON only.
+""".strip()
+
+    return prompt
 
 
 @tool("risk_efficiency")
 def risk_efficiency(symbol: str) -> str:
     """
-    Build a **strict-JSON analysis prompt** for evaluating a stock’s *Risk & Efficiency Metrics*
-    from cached OHLCV data.
-
-    Purpose
-    -------
-    For autonomous/semi-autonomous AI agents. This tool returns a **prompt string**; it does **not** analyze or advise.
-    The downstream LLM must summarize **risk regime, downside pressure, and price path efficiency** using numeric series only.
-
-    Inputs
-    ------
-    symbol : str
-        Ticker used to fetch a cached pandas.DataFrame (Redis/RAG). Required columns (time-ascending):
-        ["Open","High","Low","Close","Volume"].
-
-    Data semantics
-    --------------
-    - Lookback: last **14 sessions** for output lists (older → newer).
-    - Computations use a rolling window W=20 (or larger where noted), then we emit the **last 14** values.
-    - Values are decimals (≤ 3 dp). Non-numeric/NaN triggers insufficient-data handling.
-
-    What it computes (rolling, emit last 14)
-    ----------------------------------------
-    - sharpe_rolling     : reward-to-variability proxy (mean/σ of returns, scaled √252)
-    - sortino_rolling    : reward-to-downside-variability proxy (downside σ, scaled √252)
-    - mdd_rolling        : maximum drawdown magnitude within window (positive number)
-    - ulcer_index        : sqrt(mean(drawdown^2)) within window
-    - eff_ratio          : |ΔPrice over window| / sum(|ΔPrice daily|) (0..1)
-    - var_95             : 95% historical Value-at-Risk (positive = loss magnitude)
-    - es_95              : 95% historical Expected Shortfall (positive = loss magnitude)
-    Helper features: slopes of sharpe/eff_ratio/mdd/ulcer, last values, and z-scores.
-
-    Expected Output (LLM response)
-    ------------------------------
-    STRICT JSON matching exactly:
-      {
-        "status":"ok",
-        "header":{"symbol":<str>,"lookback_points":14},
-        "summary":{
-          "risk_regime":"muted"|"normal"|"elevated"|"mixed",
-          "efficiency_state":"efficient"|"noisy"|"mixed",
-          "downside_risk":"low"|"medium"|"high",
-          "confidence":0..1,
-          "explanation":"Plain-language summary (no indicator names).",
-          "rationale":"Concise numeric reasoning (no indicator names)."
-        },
-        "safety":{"advice_compliance":"no_advice"}
-      }
-    If the first output violates the schema, the LLM must immediately return a corrected STRICT JSON.
-
-    Decision rules (guidance to the LLM)
-    ------------------------------------
-    - Risk regime: map dispersion/drawdown mix (var_95/es_95/ulcer/mdd) — lower ⇒ “muted”, higher ⇒ “elevated”.
-    - Efficiency: higher eff_ratio with supportive reward/σ ⇒ “efficient”; low eff_ratio with choppy path ⇒ “noisy”.
-    - Downside risk: use the recent magnitude of mdd, es_95, and ulcer (last values) vs their own history.
-    - Confidence: proportional to agreement/magnitude across features; never 1.00.
-
-    Failure Modes
-    -------------
-    - If any core list has <14 points, return: {"status":"insufficient_data","reason":"core_features_len<14"}.
-    - Guards: divide-by-zero protections, NaNs rejected, windows require sufficient samples.
-
-    Compliance & Runtime Hints
-    --------------------------
-    - No trading signals, predictions, targets, or instructions.
-    - Do not mention indicator names in explanation/rationale (feature mapping is for context only).
-    - Suggested LLM params: temperature ≤ 0.3, max_tokens ≈ 120.
+    Compact STRICT-JSON prompt for risk/efficiency analysis from OHLCV.
+    Computes rolling Sharpe, Sortino, MDD, Ulcer, efficiency ratio, VaR, ES.
+    Outputs risk_regime, efficiency_state, downside_risk, confidence.
+    No advice. No indicator names.
     """
-    import json
-    import numpy as np
-    import pandas as pd
-
     k = 14
     W = 20
-    ANNUAL = np.sqrt(252.0)
+    ANNUAL = np.sqrt(252)
 
-    df = _fetch_finance_df_with_symbol(symbol=symbol)
+    df = get_price_history(symbol)
     close = pd.to_numeric(df["Close"], errors="coerce").astype(float)
 
-    # --- sanity on length ---
-    if close.dropna().shape[0] < (W + k):
-        return json.dumps({"status":"insufficient_data","reason":"not_enough_prices"})
+    # Need at least W+k prices
+    if close.dropna().shape[0] < W + k:
+        return json.dumps({"status": "insufficient_data", "reason": "not_enough_prices"})
 
-    # --- returns ---
+    # Returns
     ret = close.pct_change()
 
-    # rolling mean/std
+    # Rolling mean/std & downside std
     mu = ret.rolling(W, min_periods=W).mean()
     sd = ret.rolling(W, min_periods=W).std()
+    dsd = ret.clip(upper=0).rolling(W, min_periods=W).std()
 
-    # downside std for Sortino
-    neg = ret.clip(upper=0.0)
-    dsd = neg.rolling(W, min_periods=W).std()
-
-    # Sharpe/Sortino (risk-free assumed 0 for prompt context)
+    # Sharpe/Sortino
     sharpe = (mu / sd.replace(0, np.nan)) * ANNUAL
     sortino = (mu / dsd.replace(0, np.nan)) * ANNUAL
 
-    # Wealth index & drawdowns (rolling MDD and Ulcer)
-    wealth = (1.0 + ret.fillna(0.0)).cumprod()
+    # Wealth → Drawdown → MDD & Ulcer
+    wealth = (1 + ret.fillna(0)).cumprod()
     roll_max = wealth.rolling(W, min_periods=W).max()
-    dd = wealth / roll_max.replace(0, np.nan) - 1.0  # ≤ 0
-    mdd = dd.rolling(W, min_periods=W).min().abs()   # positive magnitude
-    ulcer = np.sqrt((dd.pow(2)).rolling(W, min_periods=W).mean())
+    dd = wealth / roll_max.replace(0, np.nan) - 1  # <=0
+    mdd = dd.rolling(W, min_periods=W).min().abs()
+    ulcer = np.sqrt(dd.pow(2).rolling(W, min_periods=W).mean())
 
-    # Efficiency ratio (ER): |Δ over W| / sum(|daily Δ|)
+    # Efficiency Ratio
     delta = close.diff()
     path_len = delta.abs().rolling(W, min_periods=W).sum()
     net_move = (close - close.shift(W)).abs()
     er = (net_move / path_len.replace(0, np.nan)).clip(0, 1)
 
-    # Historical VaR / ES at 95% over W
-    def _var_es_95(x: pd.Series):
-        x = x.dropna()
+    # VaR95 & ES95
+    def _var_es_95(x):
+        x = pd.Series(x).dropna()
         if x.shape[0] < W:
             return np.nan, np.nan
         q = np.quantile(x, 0.05)
         es = x[x <= q].mean() if (x <= q).any() else q
-        # Return positive loss magnitudes
         return float(-q), float(-es)
 
-    var_95 = ret.rolling(W, min_periods=W).apply(lambda s: _var_es_95(pd.Series(s))[0], raw=False)
-    es_95  = ret.rolling(W, min_periods=W).apply(lambda s: _var_es_95(pd.Series(s))[1], raw=False)
+    var_95 = ret.rolling(W, min_periods=W).apply(lambda s: _var_es_95(s)[0])
+    es_95  = ret.rolling(W, min_periods=W).apply(lambda s: _var_es_95(s)[1])
 
-    # --- assemble lists (core) ---
+    # Assemble last 14 entries
     lists = {
-        "sharpe_rolling": _tail(sharpe),
-        "sortino_rolling": _tail(sortino),
-        "mdd_rolling": _tail(mdd),
-        "ulcer_index": _tail(ulcer),
-        "eff_ratio": _tail(er),
-        "var_95": _tail(var_95),
-        "es_95": _tail(es_95),
+        "sharpe_rolling":     tail(sharpe, k),
+        "sortino_rolling":    tail(sortino, k),
+        "mdd_rolling":        tail(mdd, k),
+        "ulcer_index":        tail(ulcer, k),
+        "eff_ratio":          tail(er, k),
+        "var_95":             tail(var_95, k),
+        "es_95":              tail(es_95, k),
     }
 
-    # core completeness check
-    for key, arr in lists.items():
-        if len(arr) < k:
-            return json.dumps({"status":"insufficient_data","reason":f"{key}_len<{k}"})
+    # Validate
+    for k_, v in lists.items():
+        if len(v) < k:
+            return json.dumps({"status":"insufficient_data","reason":f"{k_}_len<{k}"})
 
-    # ensure native floats and precision
-    lists = {k_: _to_float_list(v, 3) for k_, v in lists.items()}
+    # Float & precision
+    lists = {k_: to_float_list(v, 3) for k_, v in lists.items()}
 
-    # helper features for LLM
     helpers = {
-        "sharpe_slope": _slope(lists["sharpe_rolling"]),
-        "eff_ratio_slope": _slope(lists["eff_ratio"]),
-        "mdd_slope": _slope(lists["mdd_rolling"]),
-        "ulcer_slope": _slope(lists["ulcer_index"]),
+        "sharpe_slope": float(slope(lists["sharpe_rolling"])),
+        "eff_ratio_slope": float(slope(lists["eff_ratio"])),
+        "mdd_slope": float(slope(lists["mdd_rolling"])),
+        "ulcer_slope": float(slope(lists["ulcer_index"])),
         "var95_last": float(lists["var_95"][-1]),
         "es95_last": float(lists["es_95"][-1]),
         "eff_ratio_last": float(lists["eff_ratio"][-1]),
-        "sharpe_z": _z(lists["sharpe_rolling"]),
-        "ulcer_z": _z(lists["ulcer_index"]),
+        "sharpe_z": to_float_list(z(lists["sharpe_rolling"]), 3),
+        "ulcer_z": to_float_list(z(lists["ulcer_index"]), 3),
     }
 
-    data_json    = json.dumps(lists, separators=(",", ":"), ensure_ascii=False)
-    helpers_json = json.dumps(helpers, separators=(",", ":"), ensure_ascii=False)
-    header_json  = json.dumps({"symbol": symbol, "lookback_points": k}, separators=(",", ":"), ensure_ascii=False)
+    data_json    = json.dumps(lists, separators=(",", ":"))
+    helpers_json = json.dumps(helpers, separators=(",", ":"))
+    header_json  = json.dumps({"symbol": symbol, "lookback_points": k})
 
-    # --- final prompt ---
-    return (
-f'You are a market analysis model.\n'
-f'Use ONLY the numeric lists provided. Do NOT mention technical indicator names.\n'
-f'Assess risk regime, downside risk, and price-path efficiency objectively. No advice, predictions, targets, or instructions.\n\n'
-f'OUTPUT REQUIREMENTS\n'
-f'- Respond with STRICT JSON using double quotes only, no markdown, no extra keys.\n'
-f'- Do not include reasoning steps.\n'
-f'- Numeric fields must be decimals with at most 3 digits after the point.\n\n'
-f'IF DATA INSUFFICIENT\n'
-f'- If any list has fewer than {k} points, respond: {{"status":"insufficient_data","reason":"<reason>"}}\n\n'
-f'SCHEMA (must match exactly)\n'
-f'{{\n'
-f'  "status":"ok",\n'
-f'  "header": {header_json},\n'
-f'  "summary": {{\n'
-f'    "risk_regime":"muted"|"normal"|"elevated"|"mixed",\n'
-f'    "efficiency_state":"efficient"|"noisy"|"mixed",\n'
-f'    "downside_risk":"low"|"medium"|"high",\n'
-f'    "confidence":0..1,\n'
-f'    "explanation":"Plain-language summary (no indicator names).",\n'
-f'    "rationale":"Concise numeric reasoning (no indicator names)."\n'
-f'  }},\n'
-f'  "safety":{{"advice_compliance":"no_advice"}}\n'
-f'}}\n\n'
-f'Feature mapping:\n'
-f'{{\n'
-f'  "sharpe_rolling":"Rolling reward-to-variability (scaled)",\n'
-f'  "sortino_rolling":"Rolling reward-to-downside-variability (scaled)",\n'
-f'  "mdd_rolling":"Rolling maximum drawdown magnitude within window",\n'
-f'  "ulcer_index":"Rolling square-root mean of drawdown squared",\n'
-f'  "eff_ratio":"Directional efficiency (net move / path length, 0..1)",\n'
-f'  "var_95":"95% historical Value-at-Risk (loss magnitude)",\n'
-f'  "es_95":"95% Expected Shortfall (average loss beyond VaR)"\n'
-f'}}\n\n'
-f'These mappings clarify feature meaning — do not restate them in your output.\n'
-f'Each array lists the most recent {k} sequential values from oldest → newest.\n\n'
-f'DECISION RULES\n'
-f'- Risk regime: use var_95, es_95, ulcer_index, and mdd_rolling magnitudes and directions.\n'
-f'- Efficiency: map eff_ratio level/slope alongside reward/variability context.\n'
-f'- Downside risk: emphasize es_95 and mdd_rolling recency; ulcer_index corroborates persistence.\n'
-f'- Confidence is proportional to agreement and magnitude across features; never 1.00.\n\n'
-f'NUMERIC DATA\n'
-f'{data_json}\n\n'
-f'HELPER FEATURES\n'
-f'{helpers_json}\n\n'
-f'Return only the JSON. Max 120 tokens.'
-    )
+    prompt = f"""
+STRICT JSON ONLY. No markdown. No extra keys.
+If insufficient: {{"status":"insufficient_data","reason":"<reason>"}}.
+
+Schema:
+{{
+  "status":"ok",
+  "header": {header_json},
+  "summary": {{
+    "risk_regime":"muted"|"normal"|"elevated"|"mixed",
+    "efficiency_state":"efficient"|"noisy"|"mixed",
+    "downside_risk":"low"|"medium"|"high",
+    "confidence":0..1,
+    "explanation":"Plain-language (no indicator names).",
+    "rationale":"Concise numeric reasoning (no indicator names)."
+  }},
+  "safety":{{"advice_compliance":"no_advice"}}
+}}
+
+Rules:
+- Use ONLY numeric values below.
+- risk_regime: based on var_95, es_95, ulcer_index, mdd trend/level.
+- efficiency_state: based on eff_ratio level/slope.
+- downside_risk: reflect mdd/es95/ulcer recency.
+- confidence <1.0, based on agreement.
+
+DATA:
+{data_json}
+
+FEATURES:
+{helpers_json}
+
+Return STRICT JSON only.
+""".strip()
+
+    return prompt
 
 
 @tool("regime_composite")
 def regime_composite(symbol: str) -> str:
     """
-    Build a **strict-JSON analysis prompt** for evaluating a stock’s *Regime & Composite Scoring*
-    from cached OHLCV data.
-
-    Purpose
-    -------
-    For autonomous/semi-autonomous AI agents. Returns a **prompt string**; it does **not** analyze or advise.
-    The downstream LLM must summarize **market regime** and an **interpretable composite score** using numeric series only.
-
-    Inputs
-    ------
-    symbol : str
-        Ticker used to fetch a cached pandas.DataFrame (Redis/RAG). Required columns (time-ascending):
-        ["Open","High","Low","Close","Volume"].
-
-    Data semantics
-    --------------
-    - Lookback for output lists: **14 sessions** (oldest → newest).
-    - Internal roll windows: typically 14–20 for feature construction.
-    - Values are decimals (≤ 3 dp). Non-numeric/NaN → insufficient-data handling.
-
-    What it computes (emit last 14)
-    --------------------------------
-    Component sub-scores in **0–100**:
-      - trend_score     : from EMA(12–26) spread slope + ADX level
-      - momentum_score  : from RSI z, ROC slope, and STOCH (slowK−slowD) slope
-      - volatility_score: from ATR z and Bollinger band-width slope
-      - flow_score      : from OBV/AD slopes and short/long volume ratio
-    Composite:
-      - composite_score : weighted blend (default weights: trend=0.3, momentum=0.3, volatility=0.2, flow=0.2)
-    Regime labeling (per point):
-      - regime_labels   : "trending" | "range_bound" | "volatile" | "quiet"
-        (heuristics combine efficiency, volatility, and trend breadth)
-
-    Helper features
-    ---------------
-    - current weights, slopes, z-scores, and last values for each component
-    - simple one-step **transition probabilities** estimated from a rolling regime series (4×4 row-normalized)
-
-    Expected Output (LLM response)
-    ------------------------------
-    STRICT JSON matching exactly:
-      {
-        "status":"ok",
-        "header":{"symbol":<str>,"lookback_points":14,"weights":{"trend":0.3,"momentum":0.3,"volatility":0.2,"flow":0.2}},
-        "summary":{
-          "market_regime":"trending"|"range_bound"|"volatile"|"quiet"|"mixed",
-          "composite_band":"very_weak"|"weak"|"neutral"|"strong"|"very_strong",
-          "components":{"trend":0..100,"momentum":0..100,"volatility":0..100,"flow":0..100},
-          "transition":{"current": "<regime>", "one_step":{"trending":0..1,"range_bound":0..1,"volatile":0..1,"quiet":0..1}},
-          "confidence":0..1,
-          "explanation":"Plain-language summary (no indicator names).",
-          "rationale":"Concise numeric reasoning (no indicator names)."
-        },
-        "safety":{"advice_compliance":"no_advice"}
-      }
-    If the first output violates the schema, the LLM must immediately return a corrected STRICT JSON.
-
-    Decision rules (guidance to the LLM)
-    ------------------------------------
-    - Market regime:
-        * high trend_score + above-average efficiency ⇒ “trending”
-        * low trend_score + tight volatility_score ⇒ “range_bound”
-        * high volatility_score with low efficiency ⇒ “volatile”
-        * low volatility_score and muted movement ⇒ “quiet”
-      Mixed/conflicting evidence ⇒ “mixed”.
-    - Composite band: map composite_score → very_weak(<20), weak(20–40), neutral(40–60), strong(60–80), very_strong(≥80).
-    - Confidence ∝ agreement and magnitude across components; never 1.00.
-
-    Failure Modes
-    -------------
-    - If any required list has <14 points → {"status":"insufficient_data","reason":"<reason>"}.
-    - Guards: divide-by-zero protection; NaNs rejected; transition matrix requires enough regime history.
-
-    Compliance & Runtime Hints
-    --------------------------
-    - No signals, predictions, or instructions.
-    - Don’t mention indicator names in explanations (feature mapping is for context only).
-    - Suggested LLM params: temperature ≤ 0.3, max_tokens ≈ 150.
+    Compact STRICT-JSON regime/composite scoring prompt.
+    Computes 0–100 trend/momentum/volatility/flow scores, composite, regimes, transitions.
+    No advice. No indicator names.
     """
 
     k = 14
     W = 20  # internal rolling window
     weights = {"trend": 0.3, "momentum": 0.3, "volatility": 0.2, "flow": 0.2}
 
-    df = _fetch_finance_df_with_symbol(symbol=symbol)
+    df = get_price_history(symbol=symbol)
     o = pd.to_numeric(df["Open"], errors="coerce").astype(float)
     h = pd.to_numeric(df["High"], errors="coerce").astype(float)
     l = pd.to_numeric(df["Low"], errors="coerce").astype(float)
@@ -1414,42 +808,42 @@ def regime_composite(symbol: str) -> str:
     # ---------- component scoring (0–100) over full series, then emit last 14) ----------
     # Trend: positive MACD hist slope + ADX level + spread slope → higher
     trend_raw = (
-        _minmax01(macd_hist) + 
-        _minmax01(adx) + 
-        _minmax01(spread)
+        minmax01(macd_hist) + 
+        minmax01(adx) + 
+        minmax01(spread)
     )
-    trend_score_full = np.round(100 * np.array(_minmax01(pd.Series(trend_raw).rolling(W).mean())), 3).tolist()
+    trend_score_full = np.round(100 * np.array(minmax01(pd.Series(trend_raw).rolling(W).mean())), 3).tolist()
 
     # Momentum: RSI z (abs/level), ROC slope, STOCH diff slope
     stoch_diff = (slowk - slowd)
     mom_raw = (
-        _minmax01(rsi) + 
-        _minmax01(roc) + 
-        _minmax01(stoch_diff)
+        minmax01(rsi) + 
+        minmax01(roc) + 
+        minmax01(stoch_diff)
     )
-    momentum_score_full = np.round(100 * np.array(_minmax01(pd.Series(mom_raw).rolling(W).mean())), 3).tolist()
+    momentum_score_full = np.round(100 * np.array(minmax01(pd.Series(mom_raw).rolling(W).mean())), 3).tolist()
 
     # Volatility: ATR z + BW slope (higher ⇒ more volatile)
     vol_raw = (
-        _minmax01(atr) + 
-        _minmax01(bw)
+        minmax01(atr) + 
+        minmax01(bw)
     )
-    volatility_score_full = np.round(100 * np.array(_minmax01(pd.Series(vol_raw).rolling(W).mean())), 3).tolist()
+    volatility_score_full = np.round(100 * np.array(minmax01(pd.Series(vol_raw).rolling(W).mean())), 3).tolist()
 
     # Flow: OBV/AD slope + volume ratio (10/20)
     vol_ratio = (vol_ema10 / (vol_ema20.replace(0, np.nan))).replace([np.inf,-np.inf], np.nan).fillna(0.0)
     flow_raw = (
-        _minmax01(obv) + 
-        _minmax01(ad) + 
-        _minmax01(vol_ratio)
+        minmax01(obv) + 
+        minmax01(ad) + 
+        minmax01(vol_ratio)
     )
-    flow_score_full = np.round(100 * np.array(_minmax01(pd.Series(flow_raw).rolling(W).mean())), 3).tolist()
+    flow_score_full = np.round(100 * np.array(minmax01(pd.Series(flow_raw).rolling(W).mean())), 3).tolist()
 
     # Synchronized tail (last 14)
-    trend_score     = _tail(pd.Series(trend_score_full))
-    momentum_score  = _tail(pd.Series(momentum_score_full))
-    volatility_score= _tail(pd.Series(volatility_score_full))
-    flow_score      = _tail(pd.Series(flow_score_full))
+    trend_score     = tail(pd.Series(trend_score_full))
+    momentum_score  = tail(pd.Series(momentum_score_full))
+    volatility_score= tail(pd.Series(volatility_score_full))
+    flow_score      = tail(pd.Series(flow_score_full))
 
     # Sanity: all components need 14 values
     for kx in (trend_score, momentum_score, volatility_score, flow_score):
@@ -1463,12 +857,12 @@ def regime_composite(symbol: str) -> str:
         np.array(volatility_score)*weights["volatility"] +
         np.array(flow_score)*weights["flow"]
     )
-    composite_score = _to_float_list(comp, 3)
+    composite_score = to_float_list(comp, 3)
 
     # Regime labels (heuristic per point, using aligned tails)
-    eff_tail = _tail(eff)
-    bw_tail  = _tail(bw)
-    adx_tail = _tail(adx)
+    eff_tail = tail(eff)
+    bw_tail  = tail(bw)
+    adx_tail = tail(adx)
 
     def _label_point(idx):
         # normalize helpers
@@ -1535,11 +929,11 @@ def regime_composite(symbol: str) -> str:
 
     helpers = {
         "weights": weights,
-        "composite_last": _last(composite_score),
-        "trend_last": _last(trend_score),
-        "momentum_last": _last(momentum_score),
-        "volatility_last": _last(volatility_score),
-        "flow_last": _last(flow_score),
+        "composite_last": last(composite_score),
+        "trend_last": last(trend_score),
+        "momentum_last": last(momentum_score),
+        "volatility_last": last(volatility_score),
+        "flow_last": last(flow_score),
         "transition_matrix": trans
     }
 
@@ -1550,49 +944,46 @@ def regime_composite(symbol: str) -> str:
                               separators=(",", ":"), ensure_ascii=False)
 
     # ---------- final prompt ----------
-    return (
-f'You are a market analysis model.\n'
-f'Use ONLY the numeric lists provided. Do NOT mention technical indicator names.\n'
-f'Summarize market regime and an interpretable composite score objectively. No advice, predictions, or targets.\n\n'
-f'OUTPUT REQUIREMENTS\n'
-f'- Respond with STRICT JSON using double quotes only, no markdown, no extra keys.\n'
-f'- Do not include reasoning steps.\n'
-f'- Numeric fields must be decimals with at most 3 digits after the point.\n\n'
-f'IF DATA INSUFFICIENT\n'
-f'- If any required list has fewer than {k} points, respond: {{"status":"insufficient_data","reason":"<reason>"}}\n\n'
-f'SCHEMA (must match exactly)\n'
-f'{{\n'
-f'  "status":"ok",\n'
-f'  "header": {header_json},\n'
-f'  "summary": {{\n'
-f'    "market_regime":"trending"|"range_bound"|"volatile"|"quiet"|"mixed",\n'
-f'    "composite_band":"very_weak"|"weak"|"neutral"|"strong"|"very_strong",\n'
-f'    "components":{{"trend":0..100,"momentum":0..100,"volatility":0..100,"flow":0..100}},\n'
-f'    "transition":{{"current":"<regime>","one_step":{{"trending":0..1,"range_bound":0..1,"volatile":0..1,"quiet":0..1}}}},\n'
-f'    "confidence":0..1,\n'
-f'    "explanation":"Plain-language summary (no indicator names).",\n'
-f'    "rationale":"Concise numeric reasoning (no indicator names)."\n'
-f'  }},\n'
-f'  "safety":{{"advice_compliance":"no_advice"}}\n'
-f'}}\n\n'
-f'Feature mapping:\n'
-f'{{\n'
-f'  "trend_score":"Composite of spread/strength slopes (0–100)",\n'
-f'  "momentum_score":"Composite of short-horizon acceleration metrics (0–100)",\n'
-f'  "volatility_score":"Composite of dispersion/spread dynamics (0–100)",\n'
-f'  "flow_score":"Composite of participation/flow dynamics (0–100)",\n'
-f'  "composite_score":"Weighted blend of components (0–100)",\n'
-f'  "regime_labels":"Per-point regime classification over the lookback"\n'
-f'}}\n\n'
-f'These mappings clarify feature meaning — do not restate them in your output.\n'
-f'Each array lists the most recent {k} sequential values from oldest → newest.\n\n'
-f'DECISION RULES\n'
-f'- Market regime from component coherence and efficiency/dispersion mix; inconsistent evidence ⇒ "mixed".\n'
-f'- Composite band from composite_score cutoffs: <20 very_weak; 20–40 weak; 40–60 neutral; 60–80 strong; ≥80 very_strong.\n'
-f'- Confidence is proportional to cross-component agreement; never 1.00.\n\n'
-f'NUMERIC DATA\n'
-f'{data_json}\n\n'
-f'HELPER FEATURES\n'
-f'{helpers_json}\n\n'
-f'Return only the JSON. Max 150 tokens.'
-    )
+    prompt = f"""
+STRICT JSON ONLY. No markdown. No extra keys.
+If insufficient: {{"status":"insufficient_data","reason":"<reason>"}}.
+
+SCHEMA:
+{{
+  "status":"ok",
+  "header": {header_json},
+  "summary": {{
+    "market_regime":"trending"|"range_bound"|"volatile"|"quiet"|"mixed",
+    "composite_band":"very_weak"|"weak"|"neutral"|"strong"|"very_strong",
+    "components":{{"trend":0..100,"momentum":0..100,"volatility":0..100,"flow":0..100}},
+    "transition":{{"current":"<regime>","one_step":{{"trending":0..1,"range_bound":0..1,"volatile":0..1,"quiet":0..1}}}},
+    "confidence":0..1,
+    "explanation":"Plain-language (no indicator names).",
+    "rationale":"Concise numeric reasoning (no indicator names)."
+  }},
+  "safety":{{"advice_compliance":"no_advice"}}
+}}
+
+RULES:
+- Use ONLY numeric lists below.
+- market_regime based on coherence among trend/momentum/volatility/flow + efficiency.
+- composite_band from composite_score: <20 very_weak; 20–40 weak; 40–60 neutral; 60–80 strong; ≥80 very_strong.
+- confidence <1.0, based on agreement only.
+
+DATA:
+{data_json}
+
+FEATURES:
+{helpers_json}
+
+Return STRICT JSON only.
+""".strip()
+
+    return prompt
+
+
+
+TOOLS = [trend_detection, momentum_strength, volatility_range, volume_flow,
+         market_structure, liquidity_participation, risk_efficiency, regime_composite]
+
+

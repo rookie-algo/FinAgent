@@ -44,7 +44,8 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'users',
-    'stock'
+    'stock',
+    'chat'
 ]
 
 REST_FRAMEWORK = {
@@ -107,12 +108,24 @@ WSGI_APPLICATION = 'app.wsgi.application'
 
 
 # settings.py
-DATABASES = {
-   'default': {
-       'ENGINE': 'django.db.backends.sqlite3', # SQLite database engine
-       'NAME': BASE_DIR / 'db.sqlite3', # Path to the database file
-   }
-}
+if os.getenv("USE_POSTGRES", "false").lower() == "true":
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.getenv("POSTGRES_DB", "stockdb"),
+            "USER": os.getenv("POSTGRES_USER", "postgres"),
+            "PASSWORD": os.getenv("POSTGRES_PASSWORD", "password"),
+            "HOST": os.getenv("POSTGRES_HOST", "db"),
+            "PORT": os.getenv("POSTGRES_PORT", "5432"),
+        }
+    }
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
+    }
 
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")

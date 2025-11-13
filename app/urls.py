@@ -8,7 +8,8 @@ from rest_framework_simplejwt.views import (
 
 from users.views import UserViewSet
 from stock.views import AddToWatchListAPIView, WatchListCreateListAPIView, \
-    WatchListDetainAPIView, StockInfoDetailAPIView
+    WatchListDetailAPIView, StockInfoDetailAPIView
+from chat.views import SendChatMessageAPIView
 
 
 urlpatterns = [
@@ -21,9 +22,12 @@ urlpatterns = [
     # Get or Add user
     path('api/users/', UserViewSet.as_view({'get': 'list', 'post': 'create'}), name='get-users'),
     path('api/watchlists/', WatchListCreateListAPIView.as_view(), name='watchlist-list-create'),
-    path('api/watchlists/detail/', WatchListDetainAPIView.as_view(), name='watchlist-list-create'),
+    path('api/watchlists/detail/', WatchListDetailAPIView.as_view(), name='watchlist-list-detail'),
     
     path('api/add-to-list/', AddToWatchListAPIView.as_view(), name='watchlist-list-create'),
-    path('api/stock-info/', StockInfoDetailAPIView.as_view(), name='watchlist-list-create'),
+    path('api/stock-info/', StockInfoDetailAPIView.as_view(), name='get-stock-info-detail'),
+
+    path('api/chat/', SendChatMessageAPIView.as_view(), name='chat-with-ai-agent'),
+    
     
 ]

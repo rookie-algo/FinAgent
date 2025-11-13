@@ -1,5 +1,6 @@
 from typing import List, Union
 
+from django.core.cache import cache
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -107,3 +108,11 @@ def z(a: Union[List[float], np.ndarray]) -> List[float]:
     return [0.0] * len(a) if len(a) < 3 or np.std(a) == 0 else (
         ((a - a.mean()) / a.std()).round(3).tolist()
     )
+
+
+def get_price_history(symbol: str) -> pd.DataFrame:
+    key = f"stock:{symbol}:history_data"
+    df = cache.get(key)
+    if df is not None:
+        return df
+    return fetch_finance_df_with_symbol(symbol)

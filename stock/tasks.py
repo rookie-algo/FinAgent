@@ -5,8 +5,7 @@ import yfinance as yf
 from stock.models import StockInfo
 
 
-BATCH_SIZE = 150       # good for yf.Tickers
-TTL_SECONDS = 90       # cache TTL for each price
+BATCH_SIZE = 15       # good for yf.Tickers
 
 
 def batch_list(lst, batch_size):
@@ -17,14 +16,18 @@ def batch_list(lst, batch_size):
 def sync_all_prices(self):
     data = {}
     try:
-        batches = batch_list([x.symbol for x in StockInfo.objects.all()], 10)
+        batches = batch_list([x.symbol for x in StockInfo.objects.all()], BATCH_SIZE)
         for symbol_list in batches:
             df = yf.download(symbol_list, period='1y', interval='1d')
             for symbol in symbol_list:
-                rk = df.xs(symbol, axis=1, level=1)
-                cache.set(f"stock_{symbol}_history", rk)
-                data[symbol] = rk.iloc[-1][['Close', 'High', 'Low', 'Open', 'Volume']].to_dict()
+                try:
+                    rk = df.xs(symbol, axis=1, level=1)
+                    key = f"stock:{symbol}:history_data"
+                    cache.set(key, rk)
+                    data[symbol] = rk.iloc[-1][['Close', 'High', 'Low', 'Open', 'Volume']].to_dict()
+                except Exception as e:
+                    data[symbol] = {"error": str(e)}
     except Exception as e:
         data[symbol] = {"price": None, "error": str(e)}
-    cache.set(f"stock_price", data)
+    cache.set("stock:realtime_price", data)
     return data

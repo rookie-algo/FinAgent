@@ -10,7 +10,7 @@ from stock.serializers import WatchListSerializer, StockInfoSerializer
 
 
 class WatchListCreateListAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]  # adjust to your auth needs
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         watchlists = WatchList.objects.filter(user=request.user)
@@ -38,7 +38,7 @@ class WatchListCreateListAPIView(APIView):
 
 
 class WatchListDetailAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]  # adjust to your auth needs
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         watchlist_id = request.query_params.get('watchlist_id')
@@ -50,7 +50,7 @@ class WatchListDetailAPIView(APIView):
 
 
 class AddToWatchListAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]  # adjust to your auth needs
+    permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
         watchlist_id = request.data.get('watchlist_id')

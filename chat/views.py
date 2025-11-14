@@ -9,7 +9,7 @@ from agent.agent import run_agent
 
 
 class SendChatMessageAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]  # adjust to your auth needs
+    permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
         user = request.user
